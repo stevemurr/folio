@@ -1,0 +1,13 @@
+version: "3.9"
+
+services:
+  folio:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ~/.folio:/root/.folio
+    environment:
+      FOLIO_CONFIG: /root/.folio/config.yaml
+    restart: unless-stopped
+

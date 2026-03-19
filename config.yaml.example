@@ -1,0 +1,24 @@
+database:
+  engine: sqlite
+  path: ~/.folio/folio.db
+
+agent:
+  endpoint: ""
+  model: llama3.2
+  api_key: none
+  max_tokens: 2048
+  temperature: 0.3
+
+market:
+  risk_free_rate: 4.25
+  benchmark_ticker: SPY
+  cache_ttl_days: 1
+
+scheduler:
+  price_refresh_cron: "0 18 * * 1-5"
+  enabled: true
+
+server:
+  host: 0.0.0.0
+  port: 8080
+

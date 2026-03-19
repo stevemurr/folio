@@ -1,0 +1,47 @@
+[project]
+name = "folio"
+version = "0.1.0"
+description = "Self-hosted investment simulator with portfolio analytics"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "apscheduler>=3.10",
+    "fastapi>=0.111",
+    "httpx>=0.27",
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+    "requests>=2.32",
+    "sqlalchemy>=2.0",
+    "uvicorn[standard]>=0.29",
+    "yfinance>=0.2.38",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["backend"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/backend",
+    "/README.md",
+    "/pyproject.toml",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["backend/tests"]
+
+[tool.ruff]
+line-length = 100
