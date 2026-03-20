@@ -36,7 +36,7 @@ const config: Config = {
         sm: "calc(var(--radius) - 8px)",
       },
       boxShadow: {
-        panel: "0 30px 70px rgba(58, 41, 33, 0.12)",
+        panel: "0 24px 80px rgba(0, 0, 0, 0.34)",
       },
       fontFamily: {
         sans: ['"Avenir Next"', '"Segoe UI"', "sans-serif"],
@@ -44,7 +44,7 @@ const config: Config = {
       },
       backgroundImage: {
         "folio-shell":
-          "radial-gradient(circle at top left, rgba(210, 111, 76, 0.26), transparent 28%), radial-gradient(circle at top right, rgba(45, 90, 103, 0.18), transparent 24%), linear-gradient(180deg, #f7efe3 0%, #efe3d2 48%, #e7d9c5 100%)",
+          "radial-gradient(circle at top left, rgba(243, 154, 87, 0.16), transparent 20%), radial-gradient(circle at top right, rgba(85, 196, 209, 0.12), transparent 18%), repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.03) 0 1px, transparent 1px 120px), repeating-linear-gradient(180deg, rgba(255, 255, 255, 0.025) 0 1px, transparent 1px 120px), linear-gradient(180deg, #0b0f13 0%, #0f151a 48%, #131d23 100%)",
       },
     },
   },

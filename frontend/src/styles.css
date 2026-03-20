@@ -4,29 +4,29 @@
 
 @layer base {
   :root {
-    color-scheme: light;
-    --background: 34 47% 94%;
-    --foreground: 22 22% 18%;
-    --card: 34 73% 98%;
-    --card-foreground: 22 22% 18%;
-    --primary: 17 48% 43%;
-    --primary-foreground: 38 70% 97%;
-    --secondary: 190 39% 28%;
-    --secondary-foreground: 33 67% 96%;
-    --muted: 34 28% 90%;
-    --muted-foreground: 22 12% 40%;
-    --accent: 43 64% 55%;
-    --accent-foreground: 24 24% 18%;
-    --border: 25 28% 78%;
-    --input: 25 28% 78%;
-    --ring: 18 56% 45%;
-    --destructive: 5 64% 44%;
+    color-scheme: dark;
+    --background: 212 24% 9%;
+    --foreground: 36 31% 92%;
+    --card: 214 18% 12%;
+    --card-foreground: 36 31% 92%;
+    --primary: 22 78% 60%;
+    --primary-foreground: 215 24% 10%;
+    --secondary: 187 56% 56%;
+    --secondary-foreground: 214 28% 11%;
+    --muted: 216 16% 17%;
+    --muted-foreground: 34 16% 72%;
+    --accent: 48 66% 58%;
+    --accent-foreground: 214 28% 11%;
+    --border: 215 14% 24%;
+    --input: 215 14% 24%;
+    --ring: 22 78% 60%;
+    --destructive: 5 64% 52%;
     --destructive-foreground: 0 0% 100%;
-    --chart-rust: 17 56% 48%;
-    --chart-teal: 188 44% 33%;
-    --chart-gold: 40 74% 60%;
-    --chart-sage: 141 21% 45%;
-    --radius: 1.25rem;
+    --chart-rust: 22 79% 62%;
+    --chart-teal: 186 63% 57%;
+    --chart-gold: 44 82% 62%;
+    --chart-sage: 140 37% 56%;
+    --radius: 1rem;
   }
 
   * {
