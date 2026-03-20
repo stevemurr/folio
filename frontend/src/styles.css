@@ -27,6 +27,11 @@ button {
   cursor: pointer;
 }
 
+button:disabled {
+  opacity: 0.56;
+  cursor: not-allowed;
+}
+
 .app-shell {
   display: grid;
   grid-template-columns: 320px minmax(0, 1fr) 320px;
@@ -50,6 +55,7 @@ button {
 .panel,
 .hero-panel,
 .agent-card,
+.agent-history,
 .agent-history-placeholder,
 .empty-stage,
 .drawer,
@@ -86,6 +92,7 @@ button {
 
 .panel,
 .agent-card,
+.agent-history,
 .agent-history-placeholder,
 .drawer {
   padding: 20px;
@@ -375,6 +382,12 @@ textarea {
   gap: 20px;
 }
 
+.agent-card,
+.agent-history {
+  display: grid;
+  gap: 16px;
+}
+
 .agent-badge {
   display: inline-flex;
   padding: 6px 12px;
@@ -385,12 +398,79 @@ textarea {
   font-weight: 700;
 }
 
+.agent-actions,
+.agent-history-header,
+.chat-message-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.agent-history-header span,
+.chat-message-header span {
+  color: #7a6d66;
+  font-size: 0.82rem;
+}
+
 .agent-history-placeholder {
   min-height: 220px;
   display: grid;
   place-items: center;
   text-align: center;
   color: #7a6d66;
+}
+
+.chat-scroll {
+  display: grid;
+  gap: 12px;
+  max-height: 420px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.chat-message {
+  display: grid;
+  gap: 8px;
+  max-width: 92%;
+  padding: 14px 16px;
+  border-radius: 20px;
+  border: 1px solid rgba(125, 96, 85, 0.14);
+  background: rgba(255, 248, 242, 0.92);
+  box-shadow: 0 12px 32px rgba(61, 43, 36, 0.05);
+}
+
+.chat-message.user {
+  margin-left: auto;
+  background: linear-gradient(135deg, rgba(141, 73, 58, 0.96), rgba(215, 122, 97, 0.92));
+  color: #fff8f4;
+}
+
+.chat-message.user .chat-message-header span {
+  color: rgba(255, 248, 244, 0.84);
+}
+
+.chat-message.draft {
+  border-style: dashed;
+}
+
+.chat-message-header {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.78rem;
+}
+
+.chat-message p,
+.analysis-body {
+  margin: 0;
+  white-space: pre-wrap;
+  line-height: 1.55;
+}
+
+.chat-composer {
+  display: grid;
+  gap: 12px;
 }
 
 .empty-stage {
@@ -410,6 +490,21 @@ textarea {
 .modal-card {
   width: min(640px, 100%);
   padding: 24px;
+}
+
+.analysis-modal {
+  display: grid;
+  gap: 18px;
+}
+
+.analysis-body {
+  min-height: 180px;
+  max-height: min(60vh, 520px);
+  overflow-y: auto;
+  padding: 18px;
+  border-radius: 18px;
+  background: rgba(255, 248, 242, 0.86);
+  border: 1px solid rgba(125, 96, 85, 0.14);
 }
 
 .button-row {
@@ -510,4 +605,3 @@ textarea {
     width: auto;
   }
 }
-

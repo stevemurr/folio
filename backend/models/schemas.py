@@ -152,6 +152,14 @@ class AnalyzeResponse(ApiModel):
     detail: ApiError
 
 
+class ChatHistoryEntry(ApiModel):
+    id: str
+    portfolio_id: str
+    role: Literal["user", "assistant"]
+    content: str
+    created_at: datetime
+
+
 def decimal_to_float(value: Decimal | None) -> float | None:
     return float(value) if value is not None else None
 

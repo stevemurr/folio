@@ -209,7 +209,7 @@ export default function App() {
         )}
       </section>
 
-      <AgentSidebar bootstrap={bootstrapQuery.data} />
+      <AgentSidebar bootstrap={bootstrapQuery.data} portfolioId={selectedPortfolioId} />
 
       {selectedPortfolioId ? (
         <AddPositionModal
@@ -222,4 +222,3 @@ export default function App() {
     </main>
   );
 }
-
