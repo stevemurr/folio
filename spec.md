@@ -9,15 +9,25 @@
 
 An embedded local LLM agent (via any OpenAI-compatible endpoint) provides natural-language portfolio analysis and persistent chat-based exploration.
 
+Current delivery plan: ship a complete stocks/ETFs experience first. Zillow-backed real-estate support remains part of the roadmap, but it is deferred until after the stock/ETF, agent, and persistence milestones are complete.
+
 ---
 
 ## Goals
 
-- Paper-trade US stocks/ETFs and real estate without real capital at risk
+- Deliver a complete paper-trading experience for US stocks/ETFs without real capital at risk
 - Replay historical decisions: "What if I had bought NVDA in Jan 2022?"
 - Surface risk-adjusted return (Sharpe) as the primary performance lens
 - Chat with a local LLM that has full context of your portfolio data
 - Stay fully self-hosted with zero required paid APIs
+- Add real-estate simulation as a follow-on phase once the stock/ETF experience is stable
+
+---
+
+## Delivery Phases
+
+- Phase 1 (current target): complete the stocks/ETFs product, including portfolio analytics, benchmark comparison, agent analysis/chat, packaging, and database improvements.
+- Phase 2 (deferred): add Zillow ingestion, `RE:` synthetic assets, metro/ZIP search, and monthly refresh handling for real-estate data.
 
 ---
 
@@ -48,8 +58,8 @@ An embedded local LLM agent (via any OpenAI-compatible endpoint) provides natura
           │                │                   │
    ┌──────▼──────┐  ┌──────▼──────┐   ┌────────▼────────┐
    │  SQLite /   │  │  yfinance   │   │  Local LLM      │
-   │  DuckDB     │  │  + Zillow   │   │  (OpenAI-compat) │
-   └─────────────┘  │  scraper    │   └─────────────────┘
+   │  DuckDB     │  │ (Zillow in  │   │  (OpenAI-compat) │
+   └─────────────┘  │  phase 2)   │   └─────────────────┘
                     └─────────────┘
 ```
 
@@ -59,11 +69,11 @@ An embedded local LLM agent (via any OpenAI-compatible endpoint) provides natura
 |---|---|---|
 | Backend API | Python / FastAPI | REST endpoints, WebSocket for chat stream |
 | Portfolio Engine | Python | Simulation math, Sharpe computation |
-| Market Data Service | yfinance + Zillow scraper | Price history ingestion and caching |
+| Market Data Service | yfinance (+ Zillow in phase 2) | Price history ingestion and caching |
 | Data Store | SQLite (dev) / DuckDB (prod) | Portfolios, positions, price cache, chat history |
 | Frontend | React + Vite + Recharts | Dashboard, charts, chat sidebar |
 | LLM Agent | OpenAI-compat HTTP client | Natural language interface over portfolio data |
-| Task Scheduler | APScheduler (in-process) | Nightly price refresh |
+| Task Scheduler | APScheduler (in-process) | Weekday stock refresh; monthly Zillow refresh in phase 2 |
 
 ---
 
@@ -77,7 +87,7 @@ An embedded local LLM agent (via any OpenAI-compatible endpoint) provides natura
 - Cache strategy: store daily closes in local DB; refresh nightly via scheduler
 - Historical depth: fetch up to 10 years on first pull; incremental updates thereafter
 
-### Real Estate — Zillow
+### Real Estate — Zillow (Phase 2, deferred)
 
 - Data available via Zillow's public ZHVI (Zillow Home Value Index) CSV downloads
   - URL: `https://www.zillow.com/research/data/`
@@ -129,6 +139,8 @@ PriceCache
   source: enum("yfinance", "zillow")
   fetched_at: datetime
 ```
+
+The schema reserves `real_estate` positions and `zillow` price sources for the deferred phase-2 extension. A stock-first release may initially exercise only the stock/ETF + `yfinance` paths.
 
 ---
 
@@ -203,7 +215,7 @@ DELETE /positions/{id}                 # remove position
 GET    /market/search?q={query}        # ticker search (yfinance)
 GET    /market/price/{ticker}          # current price + 1d change
 GET    /market/history/{ticker}?from=&to=  # OHLCV history
-GET    /market/real-estate/metros      # list of available Zillow metros
+GET    /market/real-estate/metros      # phase 2: list of available Zillow metros
 ```
 
 ### Analytics
@@ -275,7 +287,7 @@ Response is streamed as server-sent events (SSE) and displayed in a modal result
 
 - "Why is my Sharpe so low?"
 - "How would the portfolio have looked if I'd bought VTI instead of QQQ?"
-- "What's dragging down my real estate position?"
+- "What's dragging down my NVDA position?"
 - "Compare my performance to just holding SPY"
 
 The backend resolves portfolio context fresh on each message.
@@ -313,8 +325,8 @@ Sharpe column is color-coded. Table is sortable. Rows are clickable for position
 #### 2. Add Position Modal
 
 Fields:
-- Asset type (Stock/ETF or Real Estate)
-- Ticker search (autocomplete via `/market/search`)
+- Asset type (Stock/ETF in phase 1; Real Estate added in phase 2)
+- Ticker search (autocomplete via `/market/search`; Zillow metro search added in phase 2)
 - Entry date (any historical date supported)
 - Number of shares / units
 - Optional: notes
@@ -388,7 +400,7 @@ market:
 
 scheduler:
   price_refresh_cron: "0 18 * * 1-5"   # 6pm weekdays (post-market)
-  zillow_refresh_cron: "0 9 1 * *"     # 1st of month
+  zillow_refresh_cron: "0 9 1 * *"     # phase 2 only; 1st of month
 
 server:
   host: "0.0.0.0"
@@ -416,7 +428,7 @@ folio/
 │   │
 │   ├── services/
 │   │   ├── portfolio_engine.py    # Sharpe, returns, timeseries
-│   │   ├── market_data.py         # yfinance + Zillow fetch/cache
+│   │   ├── market_data.py         # yfinance now; Zillow fetch/cache in phase 2
 │   │   └── agent_service.py       # LLM context builder + client
 │   │
 │   ├── models/
@@ -509,7 +521,7 @@ dependencies = [
 
 2. **Historical entry dates are first-class** — when a user adds a position with a past entry date, the system must reconstruct portfolio history from that date forward. The `/portfolios/{id}/timeseries` endpoint must account for positions added retroactively.
 
-3. **Real estate tickers use a `RE:` prefix** — the market data service must route these to the Zillow ZHVI path rather than yfinance. The frontend ticker search should expose a separate "real estate" tab that searches metro areas by name.
+3. **Real estate tickers use a `RE:` prefix in phase 2** — the market data service must route these to the Zillow ZHVI path rather than yfinance once the deferred real-estate milestone begins. The frontend ticker search can remain stock-only until that work starts.
 
 4. **LLM agent is optional** — if no endpoint is configured, the agent sidebar shows a setup prompt. The rest of the app must work without it.
 
@@ -532,3 +544,4 @@ dependencies = [
 - Push notifications / alerts
 - Import from brokerage CSV (Robinhood, Fidelity exports)
 - Multi-portfolio comparison view
+- SEC EDGAR fundamentals via `sec-edgar-downloader` (10-K, 10-Q, 8-K filings for fundamental analysis)
