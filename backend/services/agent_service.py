@@ -9,10 +9,10 @@ import httpx
 from sqlalchemy import delete, desc, select
 from sqlalchemy.orm import Session
 
-from backend.config import get_settings
 from backend.errors import ApiErrorException
 from backend.models.db import ChatHistory
 from backend.models.schemas import ChatHistoryEntry, PortfolioDetail, PositionWithMetrics
+from backend.services.app_config_service import get_runtime_settings
 from backend.services.portfolio_engine import PortfolioEngine
 
 
@@ -30,7 +30,7 @@ def encode_sse_event(event: str, payload: dict[str, object]) -> str:
 class AgentService:
     def __init__(self, session: Session):
         self.session = session
-        self.settings = get_settings()
+        self.settings = get_runtime_settings(session)
         self.portfolio_engine = PortfolioEngine(session)
 
     def ensure_enabled(self) -> None:

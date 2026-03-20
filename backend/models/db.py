@@ -88,3 +88,23 @@ class AppConfig(Base):
     key: Mapped[str] = mapped_column(String(120), primary_key=True)
     value: Mapped[str] = mapped_column(Text, nullable=False)
 
+
+class RealEstateMarket(Base):
+    __tablename__ = "real_estate_markets"
+
+    ticker: Mapped[str] = mapped_column(String(32), primary_key=True)
+    region_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    region_type: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    label: Mapped[str] = mapped_column(String(255), nullable=False)
+    city: Mapped[str] = mapped_column(String(120), default="", nullable=False)
+    state: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    metro: Mapped[str] = mapped_column(String(160), default="", nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, nullable=False)
+
+
+class SchemaMigration(Base):
+    __tablename__ = "schema_migrations"
+
+    revision: Mapped[str] = mapped_column(String(32), primary_key=True)
+    description: Mapped[str] = mapped_column(String(255), nullable=False)
+    applied_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, nullable=False)

@@ -4,41 +4,33 @@ Last updated: 2026-03-19
 
 ## Current Status
 
-The project is at a working stock/ETF Core MVP with the agent phase now implemented relative to the updated, stock-first `spec.md`.
+The project now implements the full roadmap described in `spec.md`, including the deferred real-estate work and a user-facing runtime settings flow backed by `app_config`.
 
 Implemented:
 - FastAPI backend with portfolio, position, market, analytics, bootstrap, and capability-gated agent routes
-- SQLite persistence with schema creation on startup
+- SQLite or DuckDB persistence with revision-tracked startup migrations and a migration CLI
 - yfinance-backed price cache with batch history download and prior-trading-day fills
+- Zillow-backed metro/ZIP catalog ingestion, `RE:` synthetic assets, monthly price cache support, and monthly refresh scheduling
 - Portfolio replay engine with strict cash validation, ROI, annualized return, Sharpe, alpha, beta, allocation, and benchmark overlay
 - APScheduler weekday stock refresh job
 - OpenAI-compatible agent service with portfolio context injection, SSE analysis streaming, WebSocket chat, DB-backed chat history, and clear-history endpoints
-- React + Vite frontend with portfolio creation, selection, dashboard, chart, positions table, add-position modal, position drawer, agent sidebar chat, and analysis modal
-- Deferred real estate placeholders
+- Runtime settings overrides via `app_config`, plus read/update settings APIs with scheduler reload support
+- React + Vite frontend with Tailwind styling, shadcn-style component primitives, portfolio creation, selection, dashboard, chart, positions table, add-position modal, position drawer, agent sidebar chat, analysis modal, real-estate entry flow, and a settings modal
 - Docker build and compose packaging
 
 Verified:
 - `uv run pytest backend/tests`
 - `npm test`
 - `npm run build`
-- `docker compose build`
+
+Environment note:
+- `docker compose build` is not currently verified in this workspace because the local Docker daemon is unavailable
 
 ## Major Gaps Against `spec.md`
 
-Not implemented yet:
-- DuckDB support and a migration workflow beyond startup `create_all()`
-- Tailwind CSS and shadcn/ui adoption from the frontend stack section of the spec
-
-Deferred until after the stock-first release:
-- Real estate ingestion and search via Zillow, including `RE:` synthetic assets and monthly refresh
-
-Partially implemented:
-- Docker packaging works, but `docker-compose.yml` still uses the obsolete `version` field
-- `app_config` exists, but no user-facing configuration editing flow is wired around it
+No major functional gaps remain against the current `spec.md` scope.
 
 ## Recommended Next Steps
 
-1. Add DuckDB as an optional engine and introduce explicit migrations.
-2. Decide whether to keep the current custom CSS UI or migrate to Tailwind + shadcn/ui to match the original stack decision.
-3. Remove the obsolete `version` field from `docker-compose.yml`.
-4. After the stock-first release is stable, implement Zillow metro search, `RE:` asset pricing, and monthly refresh.
+1. Add a Vite dev proxy or configurable frontend API base URL so split frontend/backend local dev is smoother.
+2. Reduce the frontend production bundle size with code splitting around modal-heavy UI and chart surfaces.

@@ -39,10 +39,16 @@ export function useBootstrap() {
   });
 }
 
+export function useAppSettings() {
+  return useQuery({
+    queryKey: ["app-settings"],
+    queryFn: api.getAppSettings,
+  });
+}
+
 export function usePortfolios() {
   return useQuery({
     queryKey: ["portfolios"],
     queryFn: api.listPortfolios,
   });
 }
-

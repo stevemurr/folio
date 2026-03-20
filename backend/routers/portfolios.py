@@ -92,9 +92,6 @@ def add_position(
     engine = PortfolioEngine(db)
     market_data = MarketDataService(db)
     portfolio = engine.get_portfolio(portfolio_id)
-    if payload.asset_type == "real_estate":
-        raise ApiErrorException(501, "capability_disabled", "Real estate support is disabled in the MVP.")
-
     resolved = market_data.resolve_price_on_or_before(payload.ticker, payload.entry_date)
     position = Position(
         portfolio_id=portfolio.id,
@@ -115,4 +112,3 @@ def add_position(
         if item.id == position.id:
             return item
     raise ApiErrorException(500, "position_missing", "Position was created but could not be reloaded.")
-

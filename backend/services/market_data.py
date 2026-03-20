@@ -10,10 +10,11 @@ import yfinance as yf
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from backend.config import get_settings
 from backend.errors import ApiErrorException
 from backend.models.db import PriceCache
 from backend.models.schemas import MarketSearchResult, MarketPriceResponse, PricePoint
+from backend.services.app_config_service import get_runtime_settings
+from backend.services.real_estate_data import RealEstateDataService
 
 
 FETCH_BUFFER_DAYS = 7
@@ -29,7 +30,8 @@ class ResolvedPrice:
 class MarketDataService:
     def __init__(self, session: Session):
         self.session = session
-        self.settings = get_settings()
+        self.settings = get_runtime_settings(session)
+        self.real_estate = RealEstateDataService(session)
 
     def refresh_recent_prices(self, tickers: list[str]) -> None:
         end_date = date.today()
@@ -48,11 +50,20 @@ class MarketDataService:
         if not normalized:
             return
 
+        real_estate_tickers = [ticker for ticker in normalized if ticker.startswith("RE:")]
+        market_tickers = [ticker for ticker in normalized if not ticker.startswith("RE:")]
+
+        for ticker in real_estate_tickers:
+            self.real_estate.ensure_price_history(ticker, start_date, end_date, force=force)
+
+        if not market_tickers:
+            return
+
         stale_before = datetime.now(UTC).replace(tzinfo=None) - timedelta(
             days=self.settings.market.cache_ttl_days
         )
         needs_fetch: list[str] = []
-        for ticker in normalized:
+        for ticker in market_tickers:
             cache_min, cache_max, fetched_at = self.session.execute(
                 select(
                     func.min(PriceCache.date),
@@ -262,7 +273,9 @@ class MarketDataService:
     def _normalize_ticker(self, ticker: str) -> str:
         normalized = ticker.strip().upper()
         if normalized.startswith("RE:"):
-            raise ApiErrorException(501, "capability_disabled", "Real estate support is disabled in the MVP.")
+            if not self.settings.capabilities.real_estate:
+                raise ApiErrorException(501, "capability_disabled", "Real estate support is disabled.")
+            return normalized
         return normalized
 
     @staticmethod

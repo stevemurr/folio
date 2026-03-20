@@ -12,6 +12,48 @@ export type BootstrapConfig = {
   };
 };
 
+export type AppSettings = {
+  database: {
+    engine: "sqlite" | "duckdb";
+    path: string;
+  };
+  market: {
+    risk_free_rate: number;
+    benchmark_ticker: string;
+    cache_ttl_days: number;
+  };
+  agent: {
+    endpoint: string;
+    model: string;
+    api_key: string;
+    max_tokens: number;
+    temperature: number;
+  };
+  scheduler: {
+    enabled: boolean;
+    price_refresh_cron: string;
+    zillow_refresh_cron: string;
+  };
+  real_estate: {
+    enabled: boolean;
+    metro_csv_url: string;
+    zip_csv_url: string;
+    cache_ttl_days: number;
+    search_limit: number;
+  };
+  capabilities: {
+    agent: boolean;
+    real_estate: boolean;
+  };
+};
+
+export type AppSettingsUpdate = {
+  market?: Partial<AppSettings["market"]>;
+  agent?: Partial<AppSettings["agent"]>;
+  scheduler?: Partial<AppSettings["scheduler"]>;
+  real_estate?: Partial<AppSettings["real_estate"]>;
+};
+
 export type PortfolioSummary = {
   id: string;
   name: string;
@@ -92,6 +134,16 @@ export type MarketSearchResult = {
   name: string;
   asset_type: "stock" | "etf";
   exchange?: string | null;
+};
+
+export type RealEstateSearchResult = {
+  ticker: string;
+  name: string;
+  asset_type: "real_estate";
+  region_type: "metro" | "zip";
+  city: string;
+  state: string;
+  metro: string;
 };
 
 export type PricePoint = {
@@ -259,6 +311,12 @@ export function buildAgentChatUrl(portfolioId: string): string {
 
 export const api = {
   getBootstrap: () => request<BootstrapConfig>("/app/bootstrap"),
+  getAppSettings: () => request<AppSettings>("/app/settings"),
+  updateAppSettings: (payload: AppSettingsUpdate) =>
+    request<AppSettings>("/app/settings", {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
   listPortfolios: () => request<PortfolioSummary[]>("/portfolios"),
   createPortfolio: (payload: { name: string; description: string; initial_cash: number }) =>
     request<PortfolioSummary>("/portfolios", {
@@ -274,6 +332,8 @@ export const api = {
     request<AllocationSlice[]>(`/portfolios/${portfolioId}/allocation`),
   searchMarket: (query: string) =>
     request<MarketSearchResult[]>(`/market/search?q=${encodeURIComponent(query)}`),
+  searchRealEstate: (query: string) =>
+    request<RealEstateSearchResult[]>(`/market/real-estate/search?q=${encodeURIComponent(query)}`),
   addPosition: (
     portfolioId: string,
     payload: {

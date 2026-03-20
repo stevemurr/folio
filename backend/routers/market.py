@@ -6,9 +6,9 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from backend.database import get_db
-from backend.errors import ApiErrorException
-from backend.models.schemas import MarketPriceResponse, MarketSearchResult, PricePoint
+from backend.models.schemas import MarketPriceResponse, MarketSearchResult, PricePoint, RealEstateSearchResult
 from backend.services.market_data import MarketDataService
+from backend.services.real_estate_data import RealEstateDataService
 
 router = APIRouter(tags=["market"])
 
@@ -35,7 +35,17 @@ def get_market_history(
     return MarketDataService(db).get_history(ticker, start_date, end_date)
 
 
-@router.get("/market/real-estate/metros")
-def list_real_estate_metros() -> None:
-    raise ApiErrorException(501, "capability_disabled", "Real estate support is disabled in the MVP.")
+@router.get("/market/real-estate/search", response_model=list[RealEstateSearchResult])
+def search_real_estate(
+    q: str = Query(min_length=1),
+    db: Session = Depends(get_db),
+) -> list[RealEstateSearchResult]:
+    return RealEstateDataService(db).search(q)
 
+
+@router.get("/market/real-estate/metros", response_model=list[RealEstateSearchResult])
+def list_real_estate_metros(
+    q: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+) -> list[RealEstateSearchResult]:
+    return RealEstateDataService(db).list_metros(q)

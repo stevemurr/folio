@@ -9,7 +9,6 @@ import numpy as np
 import pandas as pd
 from sqlalchemy.orm import Session
 
-from backend.config import get_settings
 from backend.errors import ApiErrorException
 from backend.models.db import Portfolio, Position
 from backend.models.schemas import (
@@ -19,6 +18,7 @@ from backend.models.schemas import (
     PositionWithMetrics,
     TimeSeriesPoint,
 )
+from backend.services.app_config_service import get_runtime_settings
 from backend.services.market_data import MarketDataService
 
 
@@ -33,7 +33,7 @@ class PortfolioAnalysis:
 class PortfolioEngine:
     def __init__(self, session: Session):
         self.session = session
-        self.settings = get_settings()
+        self.settings = get_runtime_settings(session)
         self.market_data = MarketDataService(session)
 
     def get_portfolio(self, portfolio_id: str) -> Portfolio:
@@ -321,4 +321,3 @@ class PortfolioEngine:
         if days_held <= 0 or start_value <= 0 or end_value <= 0:
             return None
         return float((end_value / start_value) ** (365 / days_held) - 1)
-

@@ -24,7 +24,12 @@ def test_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
                 "database": {"engine": "sqlite", "path": str(db_path)},
                 "agent": {"endpoint": ""},
                 "market": {"risk_free_rate": 4.25, "benchmark_ticker": "SPY", "cache_ttl_days": 30},
-                "scheduler": {"enabled": False, "price_refresh_cron": "0 18 * * 1-5"},
+                "scheduler": {
+                    "enabled": False,
+                    "price_refresh_cron": "0 18 * * 1-5",
+                    "zillow_refresh_cron": "0 9 1 * *",
+                },
+                "real_estate": {"enabled": False, "metro_csv_url": "", "zip_csv_url": ""},
                 "server": {"host": "0.0.0.0", "port": 8080},
             }
         )
@@ -34,7 +39,7 @@ def test_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     get_engine.cache_clear()
     get_session_factory.cache_clear()
     init_database()
-    yield {"db_path": db_path}
+    yield {"db_path": db_path, "config_path": config_path, "tmp_path": tmp_path}
     Base.metadata.drop_all(bind=get_engine())
     get_settings.cache_clear()
     get_engine.cache_clear()

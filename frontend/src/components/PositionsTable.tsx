@@ -1,8 +1,18 @@
 import { useMemo, useState } from "react";
+import { ArrowUpDown } from "lucide-react";
 
 import { PositionWithMetrics } from "../api/client";
+import { cn } from "../lib/utils";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";
 
-type SortKey = "ticker" | "current_value" | "simple_roi" | "annualized_return" | "sharpe_ratio" | "weight";
+type SortKey =
+  | "ticker"
+  | "current_value"
+  | "dollar_pnl"
+  | "simple_roi"
+  | "annualized_return"
+  | "sharpe_ratio"
+  | "weight";
 
 type Props = {
   positions: PositionWithMetrics[];
@@ -19,11 +29,11 @@ function percent(value: number | null) {
 }
 
 function sharpeTone(value: number | null) {
-  if (value === null) return "tone-muted";
-  if (value < 0) return "tone-red";
-  if (value < 1) return "tone-yellow";
-  if (value < 2) return "tone-green";
-  return "tone-teal";
+  if (value === null) return "text-muted-foreground";
+  if (value < 0) return "text-destructive";
+  if (value < 1) return "text-amber-700";
+  if (value < 2) return "text-emerald-700";
+  return "text-secondary";
 }
 
 export default function PositionsTable({ positions, onSelect }: Props) {
@@ -52,84 +62,99 @@ export default function PositionsTable({ positions, onSelect }: Props) {
     setDescending(true);
   }
 
+  function sortButton(label: string, key: SortKey) {
+    const active = sortKey === key;
+    return (
+      <button
+        className={cn(
+          "inline-flex items-center gap-1 font-semibold transition-colors hover:text-foreground",
+          active ? "text-foreground" : "text-muted-foreground",
+        )}
+        onClick={() => updateSort(key)}
+        type="button"
+      >
+        {label}
+        <ArrowUpDown className="h-3.5 w-3.5" />
+      </button>
+    );
+  }
+
   return (
-    <section className="panel">
-      <div className="panel-header">
-        <div>
-          <h2>Positions</h2>
-          <p>Sortable live metrics for simulated holdings.</p>
-        </div>
-      </div>
-      <div className="table-wrap">
-        <table className="positions-table">
-          <thead>
-            <tr>
-              <th>
-                <button onClick={() => updateSort("ticker")} type="button">
-                  Ticker
-                </button>
-              </th>
-              <th>Type</th>
-              <th>Shares</th>
-              <th>Entry</th>
-              <th>Current</th>
-              <th>
-                <button onClick={() => updateSort("simple_roi")} type="button">
-                  ROI
-                </button>
-              </th>
-              <th>
-                <button onClick={() => updateSort("annualized_return")} type="button">
-                  Ann.
-                </button>
-              </th>
-              <th>
-                <button onClick={() => updateSort("sharpe_ratio")} type="button">
-                  Sharpe
-                </button>
-              </th>
-              <th>
-                <button onClick={() => updateSort("weight")} type="button">
-                  Weight
-                </button>
-              </th>
-              <th>
-                <button onClick={() => updateSort("current_value")} type="button">
-                  P&L
-                </button>
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {sorted.map((position) => (
-              <tr key={position.id} onClick={() => onSelect(position)}>
-                <td>
-                  <div className="ticker-cell">
-                    <strong>{position.ticker}</strong>
-                    <span>{position.status}</span>
-                  </div>
-                </td>
-                <td>{position.asset_type}</td>
-                <td>{position.shares.toFixed(3)}</td>
-                <td>{money.format(position.entry_price)}</td>
-                <td>{money.format(position.current_price)}</td>
-                <td className={position.simple_roi >= 0 ? "tone-green" : "tone-red"}>
-                  {percent(position.simple_roi)}
-                </td>
-                <td>{percent(position.annualized_return)}</td>
-                <td className={sharpeTone(position.sharpe_ratio)}>
-                  {position.sharpe_ratio === null ? "n/a" : position.sharpe_ratio.toFixed(2)}
-                </td>
-                <td>{percent(position.weight)}</td>
-                <td className={position.dollar_pnl >= 0 ? "tone-green" : "tone-red"}>
-                  {money.format(position.dollar_pnl)}
-                </td>
+    <Card>
+      <CardHeader>
+        <CardTitle>Positions</CardTitle>
+        <CardDescription>Sortable live metrics for simulated holdings.</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="overflow-x-auto">
+          <table className="min-w-full border-separate border-spacing-0">
+            <thead>
+              <tr className="text-left text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                <th className="px-4 pb-3">{sortButton("Ticker", "ticker")}</th>
+                <th className="px-4 pb-3">Type</th>
+                <th className="px-4 pb-3">Shares</th>
+                <th className="px-4 pb-3">Entry</th>
+                <th className="px-4 pb-3">Current</th>
+                <th className="px-4 pb-3">{sortButton("ROI", "simple_roi")}</th>
+                <th className="px-4 pb-3">{sortButton("Ann.", "annualized_return")}</th>
+                <th className="px-4 pb-3">{sortButton("Sharpe", "sharpe_ratio")}</th>
+                <th className="px-4 pb-3">{sortButton("Weight", "weight")}</th>
+                <th className="px-4 pb-3">{sortButton("P&L", "dollar_pnl")}</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </section>
+            </thead>
+            <tbody>
+              {sorted.map((position) => (
+                <tr
+                  className="cursor-pointer transition-colors hover:bg-background/70"
+                  key={position.id}
+                  onClick={() => onSelect(position)}
+                >
+                  <td className="rounded-l-3xl border-y border-l border-border/60 bg-card/60 px-4 py-4">
+                    <div>
+                      <strong className="block text-base">{position.ticker}</strong>
+                      <span className="mt-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground">
+                        {position.status}
+                      </span>
+                    </div>
+                  </td>
+                  <td className="border-y border-border/60 bg-card/60 px-4 py-4 capitalize">{position.asset_type}</td>
+                  <td className="border-y border-border/60 bg-card/60 px-4 py-4">{position.shares.toFixed(3)}</td>
+                  <td className="border-y border-border/60 bg-card/60 px-4 py-4">{money.format(position.entry_price)}</td>
+                  <td className="border-y border-border/60 bg-card/60 px-4 py-4">{money.format(position.current_price)}</td>
+                  <td
+                    className={cn(
+                      "border-y border-border/60 bg-card/60 px-4 py-4 font-semibold",
+                      position.simple_roi >= 0 ? "text-emerald-700" : "text-destructive",
+                    )}
+                  >
+                    {percent(position.simple_roi)}
+                  </td>
+                  <td className="border-y border-border/60 bg-card/60 px-4 py-4">
+                    {percent(position.annualized_return)}
+                  </td>
+                  <td
+                    className={cn(
+                      "border-y border-border/60 bg-card/60 px-4 py-4 font-semibold",
+                      sharpeTone(position.sharpe_ratio),
+                    )}
+                  >
+                    {position.sharpe_ratio === null ? "n/a" : position.sharpe_ratio.toFixed(2)}
+                  </td>
+                  <td className="border-y border-border/60 bg-card/60 px-4 py-4">{percent(position.weight)}</td>
+                  <td
+                    className={cn(
+                      "rounded-r-3xl border-y border-r border-border/60 bg-card/60 px-4 py-4 font-semibold",
+                      position.dollar_pnl >= 0 ? "text-emerald-700" : "text-destructive",
+                    )}
+                  >
+                    {money.format(position.dollar_pnl)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </CardContent>
+    </Card>
   );
 }
-

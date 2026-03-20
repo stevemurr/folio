@@ -120,6 +120,16 @@ class MarketSearchResult(ApiModel):
     exchange: str | None = None
 
 
+class RealEstateSearchResult(ApiModel):
+    ticker: str
+    name: str
+    asset_type: Literal["real_estate"] = "real_estate"
+    region_type: Literal["metro", "zip"]
+    city: str = ""
+    state: str = ""
+    metro: str = ""
+
+
 class PricePoint(ApiModel):
     date: date
     open: float | None
@@ -142,6 +152,83 @@ class BootstrapConfig(ApiModel):
     risk_free_rate: float
     benchmark_ticker: str
     capabilities: dict[str, bool]
+
+
+class AppSettingsDatabase(ApiModel):
+    engine: Literal["sqlite", "duckdb"]
+    path: str
+
+
+class AppSettingsMarket(ApiModel):
+    risk_free_rate: float
+    benchmark_ticker: str
+    cache_ttl_days: int
+
+
+class AppSettingsAgent(ApiModel):
+    endpoint: str
+    model: str
+    api_key: str
+    max_tokens: int
+    temperature: float
+
+
+class AppSettingsScheduler(ApiModel):
+    enabled: bool
+    price_refresh_cron: str
+    zillow_refresh_cron: str
+
+
+class AppSettingsRealEstate(ApiModel):
+    enabled: bool
+    metro_csv_url: str
+    zip_csv_url: str
+    cache_ttl_days: int
+    search_limit: int
+
+
+class AppSettings(ApiModel):
+    database: AppSettingsDatabase
+    market: AppSettingsMarket
+    agent: AppSettingsAgent
+    scheduler: AppSettingsScheduler
+    real_estate: AppSettingsRealEstate
+    capabilities: dict[str, bool]
+
+
+class AppSettingsMarketUpdate(ApiModel):
+    risk_free_rate: float | None = None
+    benchmark_ticker: str | None = None
+    cache_ttl_days: int | None = None
+
+
+class AppSettingsAgentUpdate(ApiModel):
+    endpoint: str | None = None
+    model: str | None = None
+    api_key: str | None = None
+    max_tokens: int | None = None
+    temperature: float | None = None
+
+
+class AppSettingsSchedulerUpdate(ApiModel):
+    enabled: bool | None = None
+    price_refresh_cron: str | None = None
+    zillow_refresh_cron: str | None = None
+
+
+class AppSettingsRealEstateUpdate(ApiModel):
+    enabled: bool | None = None
+    metro_csv_url: str | None = None
+    zip_csv_url: str | None = None
+    cache_ttl_days: int | None = None
+    search_limit: int | None = None
+
+
+class AppSettingsUpdate(ApiModel):
+    market: AppSettingsMarketUpdate | None = None
+    agent: AppSettingsAgentUpdate | None = None
+    scheduler: AppSettingsSchedulerUpdate | None = None
+    real_estate: AppSettingsRealEstateUpdate | None = None
 
 
 class AnalyzeRequest(ApiModel):

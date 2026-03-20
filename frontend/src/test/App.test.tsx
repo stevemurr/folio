@@ -4,6 +4,23 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import App from "../App";
 
+function appSettingsPayload() {
+  return {
+    database: { engine: "sqlite", path: "~/.folio/folio.db" },
+    market: { risk_free_rate: 4.25, benchmark_ticker: "SPY", cache_ttl_days: 1 },
+    agent: { endpoint: "", model: "llama3.2", api_key: "none", max_tokens: 2048, temperature: 0.3 },
+    scheduler: { enabled: false, price_refresh_cron: "0 18 * * 1-5", zillow_refresh_cron: "0 9 1 * *" },
+    real_estate: {
+      enabled: false,
+      metro_csv_url: "",
+      zip_csv_url: "",
+      cache_ttl_days: 31,
+      search_limit: 20,
+    },
+    capabilities: { agent: false, real_estate: false },
+  };
+}
+
 function mockFetch(payloads: Record<string, unknown>) {
   globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
@@ -13,7 +30,7 @@ function mockFetch(payloads: Record<string, unknown>) {
       return new Response(JSON.stringify({ detail: { code: "missing", message: key } }), { status: 404 });
     }
     return new Response(JSON.stringify(payloads[key]), {
-      status: key.startsWith("DELETE") ? 204 : 200,
+      status: key.startsWith("DELETE") ? 204 : key.startsWith("POST /api/v1/portfolios") ? 201 : 200,
       headers: { "Content-Type": "application/json" },
     });
   }) as typeof fetch;
@@ -45,8 +62,10 @@ describe("App", () => {
         benchmark_ticker: "SPY",
         capabilities: { agent: false, real_estate: false },
       },
+      "GET /api/v1/app/settings": appSettingsPayload(),
       "GET /api/v1/portfolios": [],
     });
+
     renderApp();
     expect(await screen.findByText(/Create a portfolio to begin/i)).toBeInTheDocument();
     expect(screen.getByText(/Setup Required/i)).toBeInTheDocument();
@@ -59,6 +78,7 @@ describe("App", () => {
         benchmark_ticker: "SPY",
         capabilities: { agent: false, real_estate: false },
       },
+      "GET /api/v1/app/settings": appSettingsPayload(),
       "GET /api/v1/portfolios": [
         {
           id: "p1",
@@ -148,6 +168,12 @@ describe("App", () => {
           { status: 200, headers: { "Content-Type": "application/json" } },
         );
       }
+      if (method === "GET" && url === "/api/v1/app/settings") {
+        return new Response(JSON.stringify(appSettingsPayload()), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
       if (method === "GET" && url === "/api/v1/portfolios") {
         return new Response(JSON.stringify([]), {
           status: 200,
@@ -225,5 +251,21 @@ describe("App", () => {
         expect.objectContaining({ method: "POST" }),
       );
     });
+  });
+
+  it("opens the runtime settings modal", async () => {
+    mockFetch({
+      "GET /api/v1/app/bootstrap": {
+        risk_free_rate: 4.25,
+        benchmark_ticker: "SPY",
+        capabilities: { agent: false, real_estate: false },
+      },
+      "GET /api/v1/app/settings": appSettingsPayload(),
+      "GET /api/v1/portfolios": [],
+    });
+
+    renderApp();
+    fireEvent.click(await screen.findByRole("button", { name: /Settings/i }));
+    expect(await screen.findByRole("heading", { name: /Runtime Settings/i })).toBeInTheDocument();
   });
 });

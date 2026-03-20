@@ -1,5 +1,5 @@
 database:
-  engine: sqlite
+  engine: sqlite # or duckdb
   path: ~/.folio/folio.db
 
 agent:
@@ -16,9 +16,16 @@ market:
 
 scheduler:
   price_refresh_cron: "0 18 * * 1-5"
+  zillow_refresh_cron: "0 9 1 * *"
   enabled: true
+
+real_estate:
+  enabled: true
+  metro_csv_url: https://files.zillowstatic.com/research/public_csvs/zhvi/Metro_zhvi_uc_sfrcondo_tier_0.33_0.67_sm_sa_month.csv
+  zip_csv_url: https://files.zillowstatic.com/research/public_csvs/zhvi/Zip_zhvi_uc_sfrcondo_tier_0.33_0.67_sm_sa_month.csv
+  cache_ttl_days: 31
+  search_limit: 20
 
 server:
   host: 0.0.0.0
   port: 8080
-
