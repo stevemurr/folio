@@ -2,8 +2,9 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { ChangeEvent, useEffect, useState } from "react";
 
 import { ApiClientError, AppSettings, api } from "../api/client";
+import ModalShell from "./ui/modal-shell";
 import { Button } from "./ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "./ui/card";
 import { Input } from "./ui/input";
 
 type Props = {
@@ -157,24 +158,20 @@ export default function SettingsModal({ open, settings, onClose }: Props) {
   }
 
   return (
-    <div
-      aria-modal="true"
-      className="fixed inset-0 z-50 grid place-items-center bg-[rgba(42,28,22,0.42)] p-4 backdrop-blur-sm"
-      role="dialog"
-    >
-      <Card className="w-full max-w-4xl">
-        <CardHeader className="flex flex-row items-start justify-between gap-4">
+    <ModalShell contentClassName="max-w-4xl" open={open}>
+      <Card className="flex max-h-[calc(100vh-2rem)] w-full flex-col overflow-hidden">
+        <CardHeader className="flex flex-row items-start justify-between gap-4 border-b border-border/60 pb-5">
           <div className="space-y-2">
             <CardTitle>Runtime Settings</CardTitle>
             <CardDescription>
               These values are stored in the database via <code>app_config</code> and override the file config.
             </CardDescription>
           </div>
-          <Button onClick={onClose} type="button" variant="ghost">
-            Close
-          </Button>
-        </CardHeader>
-        <CardContent className="grid gap-6">
+            <Button onClick={onClose} type="button" variant="ghost">
+              Close
+            </Button>
+          </CardHeader>
+        <CardContent className="grid min-h-0 gap-6 overflow-y-auto pt-6">
           <div className="grid gap-4 rounded-[28px] border border-border/70 bg-background/70 p-5 sm:grid-cols-3">
             <div>
               <div className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">Database</div>
@@ -318,17 +315,16 @@ export default function SettingsModal({ open, settings, onClose }: Props) {
               {error}
             </p>
           ) : null}
-
-          <div className="flex justify-end gap-3">
-            <Button onClick={onClose} type="button" variant="secondary">
-              Cancel
-            </Button>
-            <Button disabled={mutation.isPending} onClick={() => mutation.mutate()} type="button">
-              {mutation.isPending ? "Saving..." : "Save Settings"}
-            </Button>
-          </div>
         </CardContent>
+        <CardFooter className="justify-end border-t border-border/60 pt-4">
+          <Button onClick={onClose} type="button" variant="secondary">
+            Cancel
+          </Button>
+          <Button disabled={mutation.isPending} onClick={() => mutation.mutate()} type="button">
+            {mutation.isPending ? "Saving..." : "Save Settings"}
+          </Button>
+        </CardFooter>
       </Card>
-    </div>
+    </ModalShell>
   );
 }

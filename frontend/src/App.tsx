@@ -18,6 +18,7 @@ import WorkspaceBooksPhase from "./components/WorkspaceBooksPhase";
 import WorkspaceBrowser from "./components/WorkspaceBrowser";
 import WorkspaceComparisonChart from "./components/WorkspaceComparisonChart";
 import WorkspaceHero from "./components/WorkspaceHero";
+import WorkspaceTopBar from "./components/WorkspaceTopBar";
 import { Card, CardContent } from "./components/ui/card";
 import { useAppSettings, useBookSnapshot, useBootstrap, useWorkspaceView, useWorkspaces } from "./hooks/usePortfolio";
 import { defaultGuidedRunDate } from "./lib/guidedRun";
@@ -533,26 +534,31 @@ export default function App() {
               </div>
             </div>
           ) : (
-            <div className="mx-auto grid w-full max-w-[1440px] content-start gap-4">
+            <div className="mx-auto grid w-full max-w-[1440px] content-start gap-6">
               {selectedWorkspace ? (
-                <WorkspaceHero
-                  agentConfigured={agentConfigured}
-                  booksCount={books.length}
-                  onAddBenchmark={addBenchmark}
-                  onDeleteWorkspace={deleteSelectedWorkspace}
-                  onOpenAnalysis={() => setShowAgentDrawer(true)}
-                  onOpenBrowser={openWorkspaceBrowser}
-                  onOpenSettings={() => setShowSettingsModal(true)}
-                  onReturnToBooks={returnToBooksPhase}
-                  onRunSimulation={enterRunPhase}
-                  onSaveBankroll={(nextValue) => updateWorkspace({ initial_cash: nextValue })}
-                  onSetPrimaryBenchmark={setPrimaryBenchmark}
-                  onRemoveBenchmark={removeBenchmark}
-                  pendingWorkspaceUpdate={updateWorkspaceMutation.isPending}
-                  phase={workspacePhase}
-                  settingsDisabled={settingsQuery.isLoading || settingsQuery.isError}
-                  workspace={selectedWorkspace}
-                />
+                <>
+                  <WorkspaceTopBar
+                    agentConfigured={agentConfigured}
+                    onBackToBrowser={openWorkspaceBrowser}
+                    onDeleteWorkspace={deleteSelectedWorkspace}
+                    onOpenAnalysis={() => setShowAgentDrawer(true)}
+                    onOpenSettings={() => setShowSettingsModal(true)}
+                    settingsDisabled={settingsQuery.isLoading || settingsQuery.isError}
+                  />
+
+                  <WorkspaceHero
+                    booksCount={books.length}
+                    onAddBenchmark={addBenchmark}
+                    onReturnToBooks={returnToBooksPhase}
+                    onRunSimulation={enterRunPhase}
+                    onSaveBankroll={(nextValue) => updateWorkspace({ initial_cash: nextValue })}
+                    onSetPrimaryBenchmark={setPrimaryBenchmark}
+                    onRemoveBenchmark={removeBenchmark}
+                    pendingWorkspaceUpdate={updateWorkspaceMutation.isPending}
+                    phase={workspacePhase}
+                    workspace={selectedWorkspace}
+                  />
+                </>
               ) : null}
 
               {workspaceError && screen === "workspace" ? (
@@ -587,7 +593,6 @@ export default function App() {
                   onEditBook={openEditBookModal}
                   onSelectBook={selectBook}
                   selectedBookId={selectedBookId}
-                  startDate={selectedWorkspace?.start_date ?? workspaceStartDate}
                 />
               ) : (
                 <>

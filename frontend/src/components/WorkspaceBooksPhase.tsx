@@ -16,19 +16,7 @@ type Props = {
   onEditBook: (bookId: string) => void;
   onSelectBook: (bookId: string) => void;
   selectedBookId: string | null;
-  startDate: string;
 };
-
-function formatLongDate(value: string | null | undefined) {
-  if (!value) {
-    return "n/a";
-  }
-  return new Intl.DateTimeFormat("en-US", {
-    month: "long",
-    day: "numeric",
-    year: "numeric",
-  }).format(new Date(`${value}T00:00:00`));
-}
 
 export default function WorkspaceBooksPhase({
   books,
@@ -38,20 +26,16 @@ export default function WorkspaceBooksPhase({
   onEditBook,
   onSelectBook,
   selectedBookId,
-  startDate,
 }: Props) {
   return (
     <Card className="surface-panel border-border/80">
       <CardHeader className="flex flex-col gap-4 border-b border-border/60 pb-5 lg:flex-row lg:items-start lg:justify-between">
         <div className="space-y-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <Badge variant="secondary">Books</Badge>
-            <Badge variant="outline">{books.length} loaded</Badge>
-          </div>
+          <Badge variant="secondary">Books</Badge>
           <div className="space-y-2">
             <CardTitle>Build the books for this age.</CardTitle>
             <CardDescription className="max-w-3xl leading-6">
-              Add and tune strategies for {formatLongDate(startDate)}. Each tile is one buy-and-hold book in the shared run.
+              Add and tune strategies for this workspace. Each tile is one buy-and-hold book in the shared run.
             </CardDescription>
           </div>
         </div>
@@ -65,7 +49,7 @@ export default function WorkspaceBooksPhase({
             <div className="max-w-lg">
               <p className="text-lg font-semibold">No books loaded yet.</p>
               <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                Add the first strategy for {formatLongDate(startDate)} from the books header above.
+                Add the first strategy from the books header above.
               </p>
             </div>
           </div>

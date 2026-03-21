@@ -663,7 +663,7 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: /Select Growth Tilt/i })).toBeInTheDocument();
     expect(screen.getAllByText("SPY").length).toBeGreaterThan(0);
 
-    fireEvent.click(screen.getByRole("button", { name: /Workspace Browser/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Back to Browser/i }));
     fireEvent.click(screen.getByRole("button", { name: /Recovery Desk/i }));
 
     expect(await screen.findByText(/Build the books for this age\./i)).toBeInTheDocument();

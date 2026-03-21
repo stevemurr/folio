@@ -9,6 +9,7 @@ import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";
 import { Input } from "./ui/input";
+import ModalShell from "./ui/modal-shell";
 import { Textarea } from "./ui/textarea";
 
 type CustomAllocation = {
@@ -231,13 +232,8 @@ export default function CreateBookModal({
   }
 
   return (
-    <div
-      aria-modal="true"
-      className="fixed inset-0 z-40 overflow-y-auto bg-[rgba(29,23,19,0.5)] p-4 backdrop-blur-sm"
-      role="dialog"
-    >
-      <div className="mx-auto flex min-h-full max-w-6xl items-center">
-        <Card className="surface-panel w-full border-border/80 shadow-panel">
+    <ModalShell contentClassName="max-w-6xl" open={open}>
+      <Card className="surface-panel flex max-h-[calc(100vh-2rem)] w-full flex-col overflow-hidden border-border/80 shadow-panel">
           <CardHeader className="flex flex-row items-start justify-between gap-4 border-b border-border/60 pb-5">
             <div className="space-y-3">
               <div className="inline-flex items-center rounded-[12px] border border-primary/20 bg-primary/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] text-primary">
@@ -252,12 +248,12 @@ export default function CreateBookModal({
                 </CardDescription>
               </div>
             </div>
-            <Button aria-label="Close book creation" onClick={onClose} size="icon" variant="ghost">
-              <X className="h-4 w-4" />
-            </Button>
+              <Button aria-label="Close book creation" onClick={onClose} size="icon" variant="ghost">
+                <X className="h-4 w-4" />
+              </Button>
           </CardHeader>
 
-          <CardContent className="pt-6">
+          <CardContent className="min-h-0 overflow-y-auto pt-6">
             {loadingConfig ? (
               <div className="grid min-h-[320px] place-items-center rounded-[20px] border border-dashed border-border/70 px-6 text-center">
                 <div className="flex items-center gap-3 text-sm text-muted-foreground">
@@ -478,8 +474,7 @@ export default function CreateBookModal({
               </form>
             )}
           </CardContent>
-        </Card>
-      </div>
-    </div>
+      </Card>
+    </ModalShell>
   );
 }

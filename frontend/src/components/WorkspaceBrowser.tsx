@@ -1,4 +1,4 @@
-import { ArrowRight, Clock3, LayoutGrid, Settings2 } from "lucide-react";
+import { ArrowLeft, ArrowRight, Clock3, Settings2 } from "lucide-react";
 
 import { WorkspaceSummary } from "../api/client";
 import { cn } from "../lib/utils";
@@ -68,8 +68,8 @@ export default function WorkspaceBrowser({
           <div className="flex items-center gap-2">
             {onReturnToWorkspace ? (
               <Button onClick={onReturnToWorkspace} variant="ghost">
-                <LayoutGrid className="h-4 w-4" />
-                Current Workspace
+                <ArrowLeft className="h-4 w-4" />
+                Back to Workspace
               </Button>
             ) : null}
             <Button onClick={onCreateWorkspace} variant="secondary">

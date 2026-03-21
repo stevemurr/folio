@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { FormEvent, useEffect, useState } from "react";
-import { Bot, Check, LayoutGrid, LoaderCircle, Pencil, Plus, Settings2, Trash2, X } from "lucide-react";
+import { Check, LoaderCircle, Pencil, Plus, X } from "lucide-react";
 
 import { WorkspaceDetail, api } from "../api/client";
 import { cn } from "../lib/utils";
@@ -12,13 +12,8 @@ import { Input } from "./ui/input";
 type WorkspacePhase = "books" | "run";
 
 type Props = {
-  agentConfigured: boolean;
   booksCount: number;
   onAddBenchmark: (ticker: string) => void;
-  onDeleteWorkspace: () => void;
-  onOpenAnalysis: () => void;
-  onOpenBrowser: () => void;
-  onOpenSettings: () => void;
   onReturnToBooks: () => void;
   onRunSimulation: () => void;
   onSaveBankroll: (nextValue: number) => void;
@@ -26,20 +21,8 @@ type Props = {
   onRemoveBenchmark: (ticker: string) => void;
   phase: WorkspacePhase;
   pendingWorkspaceUpdate: boolean;
-  settingsDisabled?: boolean;
   workspace: WorkspaceDetail;
 };
-
-function formatLongDate(value: string | null | undefined) {
-  if (!value) {
-    return "n/a";
-  }
-  return new Intl.DateTimeFormat("en-US", {
-    month: "long",
-    day: "numeric",
-    year: "numeric",
-  }).format(new Date(`${value}T00:00:00`));
-}
 
 function formatCurrency(value: number) {
   return new Intl.NumberFormat("en-US", {
@@ -50,13 +33,8 @@ function formatCurrency(value: number) {
 }
 
 export default function WorkspaceHero({
-  agentConfigured,
   booksCount,
   onAddBenchmark,
-  onDeleteWorkspace,
-  onOpenAnalysis,
-  onOpenBrowser,
-  onOpenSettings,
   onReturnToBooks,
   onRunSimulation,
   onSaveBankroll,
@@ -64,7 +42,6 @@ export default function WorkspaceHero({
   onRemoveBenchmark,
   phase,
   pendingWorkspaceUpdate,
-  settingsDisabled,
   workspace,
 }: Props) {
   const [editingBankroll, setEditingBankroll] = useState(false);
@@ -91,12 +68,6 @@ export default function WorkspaceHero({
     staleTime: 5 * 60 * 1000,
   });
 
-  const phaseSteps: Array<{ active: boolean; complete: boolean; label: string }> = [
-    { label: "1 Workspace", active: phase === "books", complete: true },
-    { label: "2 Books", active: phase === "books", complete: booksCount > 0 || phase === "run" },
-    { label: "3 Run", active: phase === "run", complete: false },
-  ];
-
   function submitBankroll(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const parsed = Number(bankrollInput.replace(/[^0-9.]/g, ""));
@@ -114,14 +85,15 @@ export default function WorkspaceHero({
   }
 
   return (
-    <Card className={cn("surface-panel border-border/80 shadow-panel", phase === "books" ? "sticky top-4 z-20" : "")}>
+    <Card className="surface-panel border-border/80 shadow-panel">
       <CardHeader className="gap-5 border-b border-border/60 pb-5">
         <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
           <div className="space-y-3">
             <div className="flex flex-wrap items-center gap-2">
               <Badge>Workspace</Badge>
-              <Badge variant="outline">{formatLongDate(workspace.start_date)}</Badge>
-              <Badge variant="outline">{booksCount} books</Badge>
+              <Badge variant="outline">
+                {booksCount} {booksCount === 1 ? "book" : "books"}
+              </Badge>
             </div>
             <div className="space-y-2">
               <CardTitle className="text-3xl leading-[0.95] sm:text-4xl">{workspace.name}</CardTitle>
@@ -131,61 +103,23 @@ export default function WorkspaceHero({
                   : "The replay is loaded at the opening date and stays paused until you hit Play."}
               </CardDescription>
             </div>
-            <div className="flex flex-wrap items-center gap-2">
-              {phaseSteps.map((step) => (
-                <span
-                  className={cn(
-                    "rounded-full border px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.18em]",
-                    step.active
-                      ? "border-primary/20 bg-primary/10 text-primary"
-                      : step.complete
-                        ? "border-secondary/25 bg-secondary/10 text-secondary"
-                        : "border-border/70 bg-background/65 text-muted-foreground",
-                  )}
-                  key={step.label}
-                >
-                  {step.label}
-                </span>
-              ))}
-            </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            <Button onClick={onOpenBrowser} variant="ghost">
-              <LayoutGrid className="h-4 w-4" />
-              Workspace Browser
-            </Button>
             {phase === "run" ? (
               <Button onClick={onReturnToBooks} variant="secondary">
-                Books
+                Back to Books
               </Button>
             ) : (
               <Button disabled={!booksCount} onClick={onRunSimulation}>
                 Run Simulation
               </Button>
             )}
-            <Button onClick={onOpenAnalysis} variant="ghost">
-              <Bot className="h-4 w-4" />
-              {agentConfigured ? "Analysis" : "Analysis Setup"}
-            </Button>
-            <Button disabled={settingsDisabled} onClick={onOpenSettings} size="icon" variant="ghost">
-              <Settings2 className="h-4 w-4" />
-            </Button>
-            <Button onClick={onDeleteWorkspace} size="icon" variant="ghost">
-              <Trash2 className="h-4 w-4" />
-            </Button>
           </div>
         </div>
       </CardHeader>
 
-      <CardContent className="grid gap-4 pt-6 xl:grid-cols-[minmax(0,0.75fr)_minmax(0,0.75fr)_minmax(0,1.5fr)]">
-        <div className="surface-panel-muted rounded-[18px] border border-border/70 px-4 py-4">
-          <span className="block text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-            Start Date
-          </span>
-          <strong className="mt-2 block text-lg">{formatLongDate(workspace.start_date)}</strong>
-        </div>
-
+      <CardContent className="grid gap-4 pt-6 xl:grid-cols-[minmax(0,0.8fr)_minmax(0,1.4fr)]">
         <div className="surface-panel-muted rounded-[18px] border border-border/70 px-4 py-4">
           <div className="flex items-start justify-between gap-3">
             <div>
