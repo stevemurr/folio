@@ -17,7 +17,7 @@ type SortKey =
 type Props = {
   allocation: AllocationSlice[];
   positions: PositionWithMetrics[];
-  onSelect: (position: PositionWithMetrics) => void;
+  onSelect?: (position: PositionWithMetrics) => void;
 };
 
 const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
@@ -85,11 +85,11 @@ export default function PositionsTable({ allocation, positions, onSelect }: Prop
   }
 
   return (
-    <Card className="border-white/8 bg-[linear-gradient(180deg,rgba(18,23,29,0.98),rgba(13,16,21,0.98))]">
-      <CardHeader className="gap-4 border-b border-white/6 pb-5 lg:flex-row lg:items-start lg:justify-between">
+    <Card className="surface-panel border-border/80">
+      <CardHeader className="gap-4 border-b border-border/60 pb-5 lg:flex-row lg:items-start lg:justify-between">
         <div className="space-y-2">
           <CardTitle>Holdings</CardTitle>
-          <CardDescription>Sortable live metrics for simulated positions and current allocation.</CardDescription>
+          <CardDescription>Sortable metrics for the selected date slice and allocation snapshot.</CardDescription>
         </div>
         <div className="space-y-2 lg:max-w-[28rem] lg:text-right">
           <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
@@ -97,7 +97,7 @@ export default function PositionsTable({ allocation, positions, onSelect }: Prop
           </div>
           <div className="flex flex-wrap gap-2 lg:justify-end">
             {allocationSnapshot.map((slice) => (
-              <div className="rounded-[12px] border border-white/6 bg-white/[0.03] px-3 py-2 text-xs font-medium text-foreground" key={slice.ticker}>
+              <div className="surface-outline rounded-[12px] border border-border/70 px-3 py-2 text-xs font-medium text-foreground" key={slice.ticker}>
                 <span className="font-semibold">{slice.label}</span>{" "}
                 <span className="font-mono text-muted-foreground">{(slice.weight * 100).toFixed(1)}%</span>
               </div>
@@ -107,7 +107,7 @@ export default function PositionsTable({ allocation, positions, onSelect }: Prop
       </CardHeader>
       <CardContent className="pt-6">
         {!positions.length ? (
-          <div className="grid min-h-[240px] place-items-center rounded-[18px] border border-dashed border-white/6 bg-background/45 px-6 text-center">
+          <div className="surface-panel-muted grid min-h-[240px] place-items-center rounded-[18px] border border-dashed border-border/70 px-6 text-center">
             <div className="max-w-md">
               <p className="text-lg font-semibold">No positions on the desk yet.</p>
               <p className="mt-2 text-sm leading-6 text-muted-foreground">
@@ -116,10 +116,10 @@ export default function PositionsTable({ allocation, positions, onSelect }: Prop
             </div>
           </div>
         ) : (
-          <div className="overflow-x-auto rounded-[18px] border border-white/6 bg-background/45">
+          <div className="surface-panel-muted overflow-x-auto rounded-[18px] border border-border/70">
             <table className="min-w-full border-separate border-spacing-0">
               <thead>
-                <tr className="border-b border-white/6 text-left text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                <tr className="border-b border-border/60 text-left text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
                   <th className="px-4 py-3">{sortButton("Ticker", "ticker")}</th>
                   <th className="px-4 py-3">Type</th>
                   <th className="px-4 py-3">Shares</th>
@@ -135,9 +135,12 @@ export default function PositionsTable({ allocation, positions, onSelect }: Prop
               <tbody>
                 {sorted.map((position) => (
                   <tr
-                    className="cursor-pointer border-t border-white/6 transition-colors hover:bg-white/[0.04]"
+                    className={cn(
+                      "border-t border-border/60 transition-colors",
+                      onSelect ? "cursor-pointer hover:bg-white/[0.04]" : "",
+                    )}
                     key={position.id}
-                    onClick={() => onSelect(position)}
+                    onClick={() => onSelect?.(position)}
                   >
                     <td className="px-4 py-4">
                       <div>

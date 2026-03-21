@@ -77,3 +77,61 @@ def test_market_data_rejects_invalid_ticker(db_session, monkeypatch: pytest.Monk
 
     assert error.value.code == "invalid_ticker"
 
+
+def test_resolve_prices_on_or_after_batches_lookup(db_session, monkeypatch: pytest.MonkeyPatch):
+    add_price_history(
+        db_session,
+        "AAPL",
+        [
+            (date(2024, 1, 2), 100.0),
+            (date(2024, 1, 3), 101.0),
+        ],
+    )
+    add_price_history(
+        db_session,
+        "MSFT",
+        [
+            (date(2024, 1, 2), 200.0),
+            (date(2024, 1, 3), 202.0),
+        ],
+    )
+
+    calls: list[tuple[list[str], date, date]] = []
+
+    def track_history(self, tickers, start_date, end_date, *, force=False):  # noqa: ANN001
+        calls.append((tickers, start_date, end_date))
+
+    monkeypatch.setattr(MarketDataService, "ensure_price_history", track_history)
+    resolved = MarketDataService(db_session).resolve_prices_on_or_after(["AAPL", "MSFT"], date(2024, 1, 2))
+
+    assert list(resolved) == ["AAPL", "MSFT"]
+    assert resolved["AAPL"].close == pytest.approx(100.0)
+    assert resolved["MSFT"].close == pytest.approx(200.0)
+    assert calls == [(["AAPL", "MSFT"], date(2024, 1, 2), date.today())]
+
+
+def test_market_search_caches_normalized_queries(db_session, monkeypatch: pytest.MonkeyPatch):
+    MarketDataService._search_cache.clear()
+    calls = {"count": 0}
+
+    class FakeSearch:
+        def __init__(self, query, max_results=10):  # noqa: ANN001
+            calls["count"] += 1
+            self.quotes = [
+                {
+                    "symbol": "AAPL",
+                    "quoteType": "equity",
+                    "shortname": "Apple Inc.",
+                    "exchange": "NASDAQ",
+                }
+            ]
+
+    monkeypatch.setattr("backend.services.market_data.yf.Search", FakeSearch)
+    service = MarketDataService(db_session)
+
+    first = service.search_tickers("aapl")
+    second = service.search_tickers("AAPL")
+
+    assert calls["count"] == 1
+    assert first[0].ticker == "AAPL"
+    assert second[0].ticker == "AAPL"

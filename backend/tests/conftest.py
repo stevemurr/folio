@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from backend.config import get_settings
 from backend.database import get_engine, get_session_factory, init_database
 from backend.main import app
-from backend.models.db import Base, Portfolio, PriceCache
+from backend.models.db import Base, Portfolio, PriceCache, Workspace
 
 
 @pytest.fixture()
@@ -89,8 +89,17 @@ def recent_business_series(periods: int, base: float, step: float) -> list[tuple
     return [(timestamp.date(), base + (index * step)) for index, timestamp in enumerate(dates)]
 
 
-def create_portfolio(session, *, name: str = "Core", initial_cash: float = 10_000) -> Portfolio:
-    portfolio = Portfolio(name=name, description="", initial_cash=initial_cash)
+def create_workspace(session, *, name: str = "January 01, 2020", start_date: date | None = None) -> Workspace:
+    workspace = Workspace(name=name, start_date=start_date or date.today())
+    session.add(workspace)
+    session.commit()
+    session.refresh(workspace)
+    return workspace
+
+
+def create_portfolio(session, *, name: str = "Core", initial_cash: float = 10_000, workspace: Workspace | None = None) -> Portfolio:
+    active_workspace = workspace or create_workspace(session)
+    portfolio = Portfolio(workspace_id=active_workspace.id, name=name, description="", initial_cash=initial_cash)
     session.add(portfolio)
     session.commit()
     session.refresh(portfolio)

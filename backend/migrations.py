@@ -6,7 +6,18 @@ from dataclasses import dataclass
 
 from sqlalchemy import Connection, Engine, select
 
-from backend.models.db import Base, RealEstateMarket, SchemaMigration, now_utc
+from backend.models.db import (
+    Base,
+    BookAllocation,
+    ChatHistory,
+    Portfolio,
+    Position,
+    RealEstateMarket,
+    SchemaMigration,
+    Workspace,
+    WorkspaceBenchmark,
+    now_utc,
+)
 
 
 MigrationFn = Callable[[Connection], None]
@@ -28,9 +39,47 @@ def _upgrade_real_estate_markets(connection: Connection) -> None:
     RealEstateMarket.__table__.create(bind=connection, checkfirst=True)
 
 
+def _upgrade_workspace_books(connection: Connection) -> None:
+    ChatHistory.__table__.drop(bind=connection, checkfirst=True)
+    Position.__table__.drop(bind=connection, checkfirst=True)
+    Portfolio.__table__.drop(bind=connection, checkfirst=True)
+    Workspace.__table__.drop(bind=connection, checkfirst=True)
+
+    Workspace.__table__.create(bind=connection, checkfirst=True)
+    Portfolio.__table__.create(bind=connection, checkfirst=True)
+    Position.__table__.create(bind=connection, checkfirst=True)
+    ChatHistory.__table__.create(bind=connection, checkfirst=True)
+
+
+def _upgrade_workspace_strategy_model(connection: Connection) -> None:
+    ChatHistory.__table__.drop(bind=connection, checkfirst=True)
+    Position.__table__.drop(bind=connection, checkfirst=True)
+    BookAllocation.__table__.drop(bind=connection, checkfirst=True)
+    Portfolio.__table__.drop(bind=connection, checkfirst=True)
+    WorkspaceBenchmark.__table__.drop(bind=connection, checkfirst=True)
+    Workspace.__table__.drop(bind=connection, checkfirst=True)
+
+    Workspace.__table__.create(bind=connection, checkfirst=True)
+    WorkspaceBenchmark.__table__.create(bind=connection, checkfirst=True)
+    Portfolio.__table__.create(bind=connection, checkfirst=True)
+    BookAllocation.__table__.create(bind=connection, checkfirst=True)
+    Position.__table__.create(bind=connection, checkfirst=True)
+    ChatHistory.__table__.create(bind=connection, checkfirst=True)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration("0001_initial", "Create Folio core tables.", _upgrade_initial),
     Migration("0002_real_estate_markets", "Create Zillow real-estate catalog table.", _upgrade_real_estate_markets),
+    Migration(
+        "0003_workspace_books",
+        "Reset saved state for the workspace and book comparison model.",
+        _upgrade_workspace_books,
+    ),
+    Migration(
+        "0004_workspace_strategy_model",
+        "Reset saved state for workspace bankroll, benchmark overlays, and editable book strategies.",
+        _upgrade_workspace_strategy_model,
+    ),
 )
 
 

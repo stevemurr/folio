@@ -1,426 +1,656 @@
 import { useEffect, useMemo, useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Bot, CandlestickChart, FolderPlus, PanelLeft, Settings2, Trash2, X } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { ApiClientError, api, PositionWithMetrics } from "./api/client";
-import AddPositionModal from "./components/AddPositionModal";
+import {
+  ApiClientError,
+  BookCreateRequest,
+  WorkspaceSummary,
+  WorkspaceUpdateRequest,
+  WorkspaceView,
+  api,
+} from "./api/client";
 import AgentSidebar from "./components/AgentSidebar";
-import CreatePortfolioModal, {
-  CreatePortfolioState,
-  initialCreatePortfolioState,
-} from "./components/CreatePortfolioModal";
-import Dashboard from "./components/Dashboard";
-import PositionDrawer from "./components/PositionDrawer";
+import BookSnapshotPanel from "./components/BookSnapshotPanel";
+import CreateBookModal from "./components/CreateBookModal";
+import CreateWorkspaceSetup from "./components/CreateWorkspaceSetup";
 import SettingsModal from "./components/SettingsModal";
-import { Badge } from "./components/ui/badge";
-import { Button } from "./components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./components/ui/card";
-import { useAppSettings, useBootstrap, usePortfolio, usePortfolios } from "./hooks/usePortfolio";
+import WorkspaceBooksPhase from "./components/WorkspaceBooksPhase";
+import WorkspaceBrowser from "./components/WorkspaceBrowser";
+import WorkspaceComparisonChart from "./components/WorkspaceComparisonChart";
+import WorkspaceHero from "./components/WorkspaceHero";
+import { Card, CardContent } from "./components/ui/card";
+import { useAppSettings, useBookSnapshot, useBootstrap, useWorkspaceView, useWorkspaces } from "./hooks/usePortfolio";
+import { defaultGuidedRunDate } from "./lib/guidedRun";
 
-const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
+type PlaybackRate = 0.5 | 1 | 2 | 4;
+type WorkspacePhase = "books" | "run";
+type WorkspaceScreen = "create" | "browser" | "workspace";
+type BookModalMode = "create" | "edit";
 
-function sharpe(value: number | null | undefined) {
-  if (value === null || value === undefined || Number.isNaN(value)) {
-    return "n/a";
+const BASE_PLAYBACK_INTERVAL_MS = 180;
+const MAX_PLAYBACK_STEPS = 180;
+
+function errorMessage(error: unknown, fallback: string): string {
+  if (error instanceof ApiClientError) {
+    return error.detail.message;
   }
-  return value.toFixed(2);
+  return fallback;
+}
+
+function buildPlaybackPath(length: number): number[] {
+  if (length <= 1) {
+    return length ? [0] : [];
+  }
+
+  const steps = Math.min(length, MAX_PLAYBACK_STEPS);
+  const indices = new Set<number>();
+  for (let step = 0; step < steps; step += 1) {
+    indices.add(Math.round((step * (length - 1)) / (steps - 1)));
+  }
+
+  return [...indices].sort((left, right) => left - right);
+}
+
+function nextPlaybackIndex(path: number[], currentIndex: number): number | null {
+  for (const index of path) {
+    if (index > currentIndex) {
+      return index;
+    }
+  }
+  return null;
+}
+
+function workspaceSummaryFromView(view: WorkspaceView): WorkspaceSummary {
+  return {
+    id: view.workspace.id,
+    name: view.workspace.name,
+    start_date: view.workspace.start_date,
+    created_at: view.workspace.created_at,
+    book_count: view.books.length,
+  };
+}
+
+function removeBookFromWorkspaceView(view: WorkspaceView, bookId: string): WorkspaceView {
+  const books = view.books.filter((book) => book.id !== bookId);
+  const benchmarkTickers = view.comparison.benchmark_tickers;
+  if (!books.length) {
+    return {
+      ...view,
+      workspace: { ...view.workspace, book_count: 0 },
+      books: [],
+      comparison: {
+        ...view.comparison,
+        start_date: view.workspace.start_date,
+        end_date: view.workspace.start_date,
+        points: [],
+        benchmark_tickers: benchmarkTickers,
+      },
+    };
+  }
+
+  return {
+    ...view,
+    workspace: { ...view.workspace, book_count: books.length },
+    books,
+    comparison: {
+      ...view.comparison,
+      points: view.comparison.points.map((point) => ({
+        ...point,
+        book_values: Object.fromEntries(Object.entries(point.book_values).filter(([key]) => key !== bookId)),
+      })),
+    },
+  };
 }
 
 export default function App() {
   const queryClient = useQueryClient();
   const bootstrapQuery = useBootstrap();
   const settingsQuery = useAppSettings();
-  const portfoliosQuery = usePortfolios();
-  const [selectedPortfolioId, setSelectedPortfolioId] = useState<string | null>(null);
-  const [createState, setCreateState] = useState<CreatePortfolioState>(initialCreatePortfolioState);
-  const [createError, setCreateError] = useState<string | null>(null);
-  const [showAddModal, setShowAddModal] = useState(false);
-  const [showCreateModal, setShowCreateModal] = useState(false);
-  const [showPortfolioRail, setShowPortfolioRail] = useState(false);
+  const workspacesQuery = useWorkspaces();
+
+  const [screen, setScreen] = useState<WorkspaceScreen>("create");
+  const [workspacePhase, setWorkspacePhase] = useState<WorkspacePhase>("books");
+  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(null);
+  const [selectedBookId, setSelectedBookId] = useState<string | null>(null);
+  const [workspaceStartDate, setWorkspaceStartDate] = useState(defaultGuidedRunDate());
+  const [workspaceError, setWorkspaceError] = useState<string | null>(null);
+  const [bookError, setBookError] = useState<string | null>(null);
+  const [showBookModal, setShowBookModal] = useState(false);
+  const [bookModalMode, setBookModalMode] = useState<BookModalMode>("create");
+  const [editingBookId, setEditingBookId] = useState<string | null>(null);
   const [showAgentDrawer, setShowAgentDrawer] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
-  const [showBenchmark, setShowBenchmark] = useState(true);
-  const [activePosition, setActivePosition] = useState<PositionWithMetrics | null>(null);
+  const [selectedDateIndex, setSelectedDateIndex] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [playbackRate, setPlaybackRate] = useState<PlaybackRate>(1);
+  const [requestedSnapshotDate, setRequestedSnapshotDate] = useState<string | null>(null);
 
-  const portfolio = usePortfolio(selectedPortfolioId);
+  const workspaceViewQuery = useWorkspaceView(selectedWorkspaceId);
+  const workspaceView = workspaceViewQuery.data ?? null;
+  const selectedWorkspace = workspaceView?.workspace ?? null;
+  const books = workspaceView?.books ?? [];
+  const comparison = workspaceView?.comparison ?? null;
+  const comparisonPoints = comparison?.points ?? [];
+  const clampedDateIndex = comparisonPoints.length ? Math.min(selectedDateIndex, comparisonPoints.length - 1) : 0;
+  const selectedDate = comparisonPoints[clampedDateIndex]?.date ?? selectedWorkspace?.start_date ?? null;
+  const selectedBook = useMemo(
+    () => books.find((book) => book.id === selectedBookId) ?? null,
+    [books, selectedBookId],
+  );
+  const snapshotQuery = useBookSnapshot(selectedBookId, requestedSnapshotDate);
+  const playbackPath = useMemo(() => buildPlaybackPath(comparisonPoints.length), [comparisonPoints.length]);
+  const agentConfigured = Boolean(bootstrapQuery.data?.capabilities.agent);
+
+  const bookConfigQuery = useQuery({
+    queryKey: ["book-config", editingBookId],
+    queryFn: ({ signal }) => api.getBookConfig(editingBookId!, signal),
+    enabled: showBookModal && bookModalMode === "edit" && Boolean(editingBookId),
+    staleTime: 5 * 60 * 1000,
+  });
+
+  function resetPlayback() {
+    setSelectedDateIndex(0);
+    setIsPlaying(false);
+    setRequestedSnapshotDate(null);
+  }
+
+  function openWorkspaceCreate() {
+    setWorkspaceError(null);
+    setScreen("create");
+  }
+
+  function openWorkspaceBrowser() {
+    setWorkspaceError(null);
+    setScreen("browser");
+  }
+
+  function selectWorkspace(workspaceId: string) {
+    setSelectedWorkspaceId(workspaceId);
+    setSelectedBookId(null);
+    setWorkspacePhase("books");
+    resetPlayback();
+    setScreen("workspace");
+  }
+
+  function openCreateBookModal() {
+    setBookError(null);
+    setBookModalMode("create");
+    setEditingBookId(null);
+    setShowBookModal(true);
+  }
+
+  function openEditBookModal(bookId: string) {
+    setBookError(null);
+    setBookModalMode("edit");
+    setEditingBookId(bookId);
+    setShowBookModal(true);
+  }
+
+  function closeBookModal() {
+    setShowBookModal(false);
+    setBookError(null);
+    setBookModalMode("create");
+    setEditingBookId(null);
+  }
+
+  function enterRunPhase() {
+    if (!books.length) {
+      return;
+    }
+    setWorkspacePhase("run");
+    resetPlayback();
+  }
+
+  function returnToBooksPhase() {
+    setWorkspacePhase("books");
+    resetPlayback();
+  }
+
+  function selectDateIndex(index: number) {
+    const max = Math.max(comparisonPoints.length - 1, 0);
+    const next = Math.min(Math.max(index, 0), max);
+    setSelectedDateIndex(next);
+    setIsPlaying(false);
+  }
+
+  function selectBook(bookId: string) {
+    setSelectedBookId(bookId);
+    setIsPlaying(false);
+  }
+
+  function togglePlayback() {
+    if (!comparisonPoints.length) {
+      return;
+    }
+
+    if (isPlaying) {
+      setIsPlaying(false);
+      return;
+    }
+
+    if (clampedDateIndex >= comparisonPoints.length - 1) {
+      setSelectedDateIndex(0);
+    }
+    setIsPlaying(comparisonPoints.length > 1);
+  }
+
+  function deleteSelectedWorkspace() {
+    if (!selectedWorkspaceId) {
+      return;
+    }
+    if (!window.confirm("Delete this workspace and all of its books?")) {
+      return;
+    }
+    deleteWorkspaceMutation.mutate();
+  }
+
+  function deleteBook(bookId: string) {
+    if (!window.confirm("Delete this book from the workspace?")) {
+      return;
+    }
+    deleteBookMutation.mutate(bookId);
+  }
+
+  function applyWorkspaceViewUpdate(updated: WorkspaceView) {
+    queryClient.setQueryData(["workspace-view", updated.workspace.id], updated);
+    queryClient.setQueryData<WorkspaceSummary[]>(["workspaces"], (current) => {
+      const next = current ?? [];
+      const summary = workspaceSummaryFromView(updated);
+      return [...next.filter((workspaceItem) => workspaceItem.id !== summary.id), summary];
+    });
+  }
+
+  function applyBookMutationSuccess(created: { book: { id: string }; workspace_view: WorkspaceView; snapshot: { as_of: string } }) {
+    setBookError(null);
+    closeBookModal();
+    setSelectedBookId(created.book.id);
+    setWorkspacePhase("books");
+    resetPlayback();
+    applyWorkspaceViewUpdate(created.workspace_view);
+    queryClient.setQueryData(["book-snapshot", created.book.id, created.snapshot.as_of], created.snapshot);
+    setScreen("workspace");
+  }
+
+  function updateWorkspace(payload: WorkspaceUpdateRequest) {
+    if (!selectedWorkspaceId) {
+      return;
+    }
+    updateWorkspaceMutation.mutate(payload);
+  }
+
+  function addBenchmark(ticker: string) {
+    if (!selectedWorkspace) {
+      return;
+    }
+    const normalized = ticker.trim().toUpperCase();
+    if (!normalized || selectedWorkspace.benchmarks.some((item) => item.ticker === normalized)) {
+      return;
+    }
+    updateWorkspace({
+      benchmark_tickers: [...selectedWorkspace.benchmarks.map((item) => item.ticker), normalized],
+      primary_benchmark_ticker: selectedWorkspace.benchmarks.find((item) => item.is_primary)?.ticker ?? normalized,
+    });
+  }
+
+  function removeBenchmark(ticker: string) {
+    if (!selectedWorkspace) {
+      return;
+    }
+    const nextTickers = selectedWorkspace.benchmarks.map((item) => item.ticker).filter((item) => item !== ticker);
+    if (!nextTickers.length) {
+      return;
+    }
+    const currentPrimary = selectedWorkspace.benchmarks.find((item) => item.is_primary)?.ticker;
+    updateWorkspace({
+      benchmark_tickers: nextTickers,
+      primary_benchmark_ticker: currentPrimary === ticker ? nextTickers[0] : currentPrimary,
+    });
+  }
+
+  function setPrimaryBenchmark(ticker: string) {
+    updateWorkspace({ primary_benchmark_ticker: ticker });
+  }
 
   useEffect(() => {
-    if (!selectedPortfolioId && portfoliosQuery.data?.length) {
-      setSelectedPortfolioId(portfoliosQuery.data[0].id);
+    const workspaceList = workspacesQuery.data ?? [];
+    if (!workspaceList.length) {
+      if (selectedWorkspaceId) {
+        setSelectedWorkspaceId(null);
+        setSelectedBookId(null);
+        setWorkspacePhase("books");
+        resetPlayback();
+      }
+      setScreen("create");
+      return;
     }
-  }, [portfoliosQuery.data, selectedPortfolioId]);
 
-  const createMutation = useMutation({
-    mutationFn: () =>
-      api.createPortfolio({
-        name: createState.name,
-        description: createState.description,
-        initial_cash: Number(createState.initialCash),
-      }),
-    onSuccess: async (created) => {
-      setCreateState(initialCreatePortfolioState);
-      setCreateError(null);
-      setShowCreateModal(false);
-      setShowPortfolioRail(false);
-      setSelectedPortfolioId(created.id);
-      await queryClient.invalidateQueries({ queryKey: ["portfolios"] });
+    if (selectedWorkspaceId && !workspaceList.some((workspaceItem) => workspaceItem.id === selectedWorkspaceId)) {
+      setSelectedWorkspaceId(null);
+      setSelectedBookId(null);
+      setWorkspacePhase("books");
+      resetPlayback();
+      setScreen("browser");
+    }
+  }, [selectedWorkspaceId, workspacesQuery.data]);
+
+  useEffect(() => {
+    if (!books.length) {
+      setSelectedBookId(null);
+      if (workspacePhase === "run") {
+        setWorkspacePhase("books");
+      }
+      return;
+    }
+    if (!selectedBookId || !books.some((book) => book.id === selectedBookId)) {
+      setSelectedBookId(books[0].id);
+    }
+  }, [books, selectedBookId, workspacePhase]);
+
+  useEffect(() => {
+    if (!comparisonPoints.length) {
+      setSelectedDateIndex(0);
+      setIsPlaying(false);
+      return;
+    }
+    if (selectedDateIndex > comparisonPoints.length - 1) {
+      setSelectedDateIndex(comparisonPoints.length - 1);
+    }
+  }, [comparisonPoints.length, selectedDateIndex]);
+
+  useEffect(() => {
+    if (workspacePhase !== "run" || !selectedBookId || !selectedDate) {
+      setRequestedSnapshotDate(null);
+      return;
+    }
+    if (isPlaying) {
+      return;
+    }
+    setRequestedSnapshotDate(selectedDate);
+  }, [isPlaying, selectedBookId, selectedDate, workspacePhase]);
+
+  useEffect(() => {
+    if (!isPlaying) {
+      return;
+    }
+    if (comparisonPoints.length <= 1) {
+      setIsPlaying(false);
+      return;
+    }
+
+    const nextIndex = nextPlaybackIndex(playbackPath, clampedDateIndex);
+    if (nextIndex === null) {
+      setIsPlaying(false);
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      setSelectedDateIndex(nextIndex);
+    }, BASE_PLAYBACK_INTERVAL_MS / playbackRate);
+
+    return () => window.clearTimeout(timer);
+  }, [clampedDateIndex, comparisonPoints.length, isPlaying, playbackPath, playbackRate]);
+
+  const createWorkspaceMutation = useMutation({
+    mutationFn: () => api.createWorkspace({ start_date: workspaceStartDate }),
+    onSuccess: (created) => {
+      setWorkspaceError(null);
+      setWorkspaceStartDate(defaultGuidedRunDate());
+      applyWorkspaceViewUpdate(created);
+      selectWorkspace(created.workspace.id);
     },
     onError: (error) => {
-      if (error instanceof ApiClientError) {
-        setCreateError(error.detail.message);
-      } else {
-        setCreateError("Unable to create portfolio.");
+      setWorkspaceError(errorMessage(error, "Unable to create workspace."));
+    },
+  });
+
+  const updateWorkspaceMutation = useMutation({
+    mutationFn: (payload: WorkspaceUpdateRequest) => api.updateWorkspace(selectedWorkspaceId!, payload),
+    onSuccess: (updated) => {
+      setWorkspaceError(null);
+      resetPlayback();
+      applyWorkspaceViewUpdate(updated);
+    },
+    onError: (error) => {
+      setWorkspaceError(errorMessage(error, "Unable to update workspace."));
+    },
+  });
+
+  const createBookMutation = useMutation({
+    mutationFn: (payload: BookCreateRequest) => {
+      if (!selectedWorkspaceId || !selectedWorkspace) {
+        throw new Error("Select a workspace first.");
       }
+      return api.createBook(selectedWorkspaceId, {
+        ...payload,
+        snapshot_as_of: selectedWorkspace.start_date,
+      });
+    },
+    onSuccess: applyBookMutationSuccess,
+    onError: (error) => {
+      setBookError(errorMessage(error, "Unable to create book."));
     },
   });
 
-  const deleteMutation = useMutation({
-    mutationFn: () => api.deletePortfolio(selectedPortfolioId!),
-    onSuccess: async () => {
-      setSelectedPortfolioId(null);
-      setActivePosition(null);
-       setShowAgentDrawer(false);
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["portfolios"] }),
-        queryClient.removeQueries({ queryKey: ["portfolio"] }),
-        queryClient.removeQueries({ queryKey: ["portfolio-timeseries"] }),
-        queryClient.removeQueries({ queryKey: ["portfolio-allocation"] }),
-      ]);
+  const updateBookMutation = useMutation({
+    mutationFn: (payload: BookCreateRequest) => {
+      if (!editingBookId) {
+        throw new Error("Select a book to edit.");
+      }
+      return api.updateBook(editingBookId, payload);
+    },
+    onSuccess: applyBookMutationSuccess,
+    onError: (error) => {
+      setBookError(errorMessage(error, "Unable to update book."));
     },
   });
 
-  const selectedSummary = useMemo(
-    () => portfoliosQuery.data?.find((portfolioItem) => portfolioItem.id === selectedPortfolioId) ?? null,
-    [portfoliosQuery.data, selectedPortfolioId],
-  );
+  const deleteWorkspaceMutation = useMutation({
+    mutationFn: () => api.deleteWorkspace(selectedWorkspaceId!),
+    onSuccess: () => {
+      const deletedWorkspaceId = selectedWorkspaceId;
+      const currentWorkspaces = queryClient.getQueryData<WorkspaceSummary[]>(["workspaces"]) ?? [];
+      const remainingWorkspaces = deletedWorkspaceId
+        ? currentWorkspaces.filter((workspaceItem) => workspaceItem.id !== deletedWorkspaceId)
+        : currentWorkspaces;
 
-  const portfolioReady = Boolean(
-    selectedPortfolioId && portfolio.detail.data && portfolio.timeseries.data && portfolio.allocation.data,
-  );
-  const portfolioLoading = Boolean(selectedPortfolioId) && portfolio.isLoading;
-  const portfolioErrored =
-    Boolean(selectedPortfolioId) &&
-    (portfolio.detail.isError || portfolio.timeseries.isError || portfolio.allocation.isError);
-  const agentConfigured = Boolean(bootstrapQuery.data?.capabilities.agent);
-  const currentValue = portfolio.detail.data?.metrics.total_value ?? selectedSummary?.initial_cash ?? 0;
-  const openPositions = portfolio.detail.data?.metrics.open_position_count ?? selectedSummary?.open_positions ?? 0;
+      setSelectedWorkspaceId(null);
+      setSelectedBookId(null);
+      setWorkspacePhase("books");
+      resetPlayback();
+      setShowAgentDrawer(false);
+      setScreen(remainingWorkspaces.length ? "browser" : "create");
 
-  const portfolioRailContent = (
-    <div className="flex h-full flex-col gap-4 rounded-[24px] border border-border/80 bg-[linear-gradient(180deg,rgba(15,18,23,0.98),rgba(10,13,17,0.98))] p-4 shadow-panel">
-      <div className="space-y-4 border-b border-white/5 pb-4">
-        <div className="flex items-center justify-between gap-3">
-          <div className="inline-flex items-center rounded-[10px] border border-primary/20 bg-primary/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] text-primary">
-            Folio Desk
-          </div>
-          <Button
-            disabled={settingsQuery.isLoading || settingsQuery.isError}
-            onClick={() => setShowSettingsModal(true)}
-            size="icon"
-            variant="ghost"
-          >
-            <Settings2 className="h-4 w-4" />
-          </Button>
-        </div>
-        <div className="space-y-2">
-          <CardTitle className="text-[2.25rem] leading-none text-foreground">Replay Terminal</CardTitle>
-          <CardDescription className="leading-6 text-muted-foreground">
-            A darker, tighter desk built around replays, decisions, and the state of the book.
-          </CardDescription>
-        </div>
-        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-1">
-          <Button className="w-full justify-start" onClick={() => setShowCreateModal(true)}>
-            <FolderPlus className="h-4 w-4" />
-            New Portfolio
-          </Button>
-          <Button className="w-full justify-start" onClick={() => setShowAgentDrawer(true)} variant="secondary">
-            <Bot className="h-4 w-4" />
-            {agentConfigured ? "Open Analysis" : "Analysis Setup"}
-          </Button>
-        </div>
-      </div>
+      if (deletedWorkspaceId) {
+        queryClient.setQueryData(["workspaces"], remainingWorkspaces);
+        queryClient.removeQueries({ queryKey: ["workspace-view", deletedWorkspaceId] });
+      }
+      queryClient.removeQueries({ queryKey: ["book-snapshot"] });
+    },
+  });
 
-      <div className="space-y-3">
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-muted-foreground">
-              Active Books
-            </div>
-            <p className="mt-1 text-sm text-muted-foreground">Switch desks or start a fresh run.</p>
-          </div>
-          <Badge variant="outline">{portfoliosQuery.data?.length ?? 0}</Badge>
-        </div>
+  const deleteBookMutation = useMutation({
+    mutationFn: (bookId: string) => api.deleteBook(bookId),
+    onSuccess: (_, deletedBookId) => {
+      setWorkspacePhase("books");
+      resetPlayback();
+      setShowAgentDrawer(false);
+      if (selectedBookId === deletedBookId) {
+        setSelectedBookId(null);
+      }
+      if (selectedWorkspaceId) {
+        const currentView = queryClient.getQueryData<WorkspaceView>(["workspace-view", selectedWorkspaceId]);
+        if (currentView) {
+          const updatedView = removeBookFromWorkspaceView(currentView, deletedBookId);
+          applyWorkspaceViewUpdate(updatedView);
+        }
+      }
+      queryClient.removeQueries({ queryKey: ["book-snapshot", deletedBookId] });
+    },
+  });
 
-        <div className="space-y-2">
-          {portfoliosQuery.data?.map((portfolioItem) => (
-            <button
-              className={[
-                "w-full rounded-[16px] border px-4 py-3 text-left transition-all",
-                portfolioItem.id === selectedPortfolioId
-                  ? "border-secondary/35 bg-secondary/14 text-foreground shadow-[0_0_0_1px_rgba(93,215,224,0.15)]"
-                  : "border-white/6 bg-white/[0.03] hover:bg-white/[0.06]",
-              ].join(" ")}
-              key={portfolioItem.id}
-              onClick={() => {
-                setSelectedPortfolioId(portfolioItem.id);
-                setActivePosition(null);
-                setShowPortfolioRail(false);
-              }}
-              type="button"
-            >
-              <div className="flex items-center justify-between gap-3">
-                <strong className="block text-base">{portfolioItem.name}</strong>
-                <span className="font-mono text-xs text-muted-foreground">{portfolioItem.open_positions}</span>
-              </div>
-              <span className="mt-1 block text-xs uppercase tracking-[0.18em] text-muted-foreground">
-                open positions
-              </span>
-            </button>
-          ))}
-          {!portfoliosQuery.data?.length ? (
-            <p className="rounded-[16px] border border-dashed border-white/8 bg-white/[0.03] px-4 py-5 text-sm text-muted-foreground">
-              No portfolios yet. Open a new desk to begin replaying positions.
-            </p>
-          ) : null}
-        </div>
-      </div>
-
-      {selectedSummary ? (
-        <div className="mt-auto rounded-[18px] border border-white/6 bg-white/[0.03] p-4">
-          <div className="flex items-start justify-between gap-4">
-            <div className="space-y-1">
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">Focused Desk</p>
-              <h3 className="font-display text-2xl leading-none">{selectedSummary.name}</h3>
-              <p className="text-sm leading-6 text-muted-foreground">
-                {selectedSummary.description || "Historical replay active."}
-              </p>
-            </div>
-            <Badge variant="secondary">{openPositions} open</Badge>
-          </div>
-          <div className="mt-4 grid grid-cols-2 gap-3">
-            <div className="rounded-[14px] border border-white/6 bg-background/55 px-4 py-4">
-              <span className="block text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-                Desk Value
-              </span>
-              <strong className="mt-2 block font-mono text-xl">{money.format(currentValue)}</strong>
-            </div>
-            <div className="rounded-[14px] border border-white/6 bg-background/55 px-4 py-4">
-              <span className="block text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-                Sharpe
-              </span>
-              <strong className="mt-2 block font-mono text-xl">{sharpe(portfolio.detail.data?.metrics.sharpe_ratio)}</strong>
-            </div>
-          </div>
-          <Button
-            className="mt-4 w-full justify-start text-destructive hover:bg-destructive/10 hover:text-destructive"
-            disabled={deleteMutation.isPending || !selectedPortfolioId}
-            onClick={() => deleteMutation.mutate()}
-            variant="ghost"
-          >
-            <Trash2 className="h-4 w-4" />
-            {deleteMutation.isPending ? "Deleting..." : "Delete Portfolio"}
-          </Button>
-        </div>
-      ) : null}
-    </div>
-  );
-
-  if (bootstrapQuery.isLoading || portfoliosQuery.isLoading) {
-    return (
-      <main className="grid min-h-screen place-items-center px-6 text-lg font-medium text-foreground/80">
-        Loading Folio...
-      </main>
-    );
-  }
-
-  if (bootstrapQuery.isError || !bootstrapQuery.data) {
-    return (
-      <main className="grid min-h-screen place-items-center px-6 text-lg font-medium text-destructive">
-        Unable to load app bootstrap configuration.
-      </main>
-    );
-  }
+  const loadingState =
+    bootstrapQuery.isLoading ||
+    settingsQuery.isLoading ||
+    workspacesQuery.isLoading ||
+    (selectedWorkspaceId ? workspaceViewQuery.isLoading : false);
 
   return (
-    <main className="min-h-screen px-3 py-3 text-foreground sm:px-4 lg:px-6">
-      <div className="mx-auto flex min-h-[calc(100vh-1.5rem)] max-w-[1680px] gap-4">
-        <aside className="hidden w-[19rem] shrink-0 xl:flex">{portfolioRailContent}</aside>
-
-        <div className="min-w-0 flex-1 space-y-4">
-          <header className="sticky top-3 z-20 flex flex-wrap items-center justify-between gap-3 rounded-[18px] border border-white/8 bg-[rgba(10,14,18,0.78)] px-4 py-3 shadow-panel backdrop-blur-md">
-            <div className="flex min-w-0 items-center gap-2">
-              <Button className="xl:hidden" onClick={() => setShowPortfolioRail(true)} size="sm" variant="outline">
-                <PanelLeft className="h-4 w-4" />
-                Portfolios
-              </Button>
-              <div className="min-w-0 flex flex-wrap items-center gap-2">
-                <Badge variant="secondary">Session Live</Badge>
-                <div className="min-w-0">
-                  <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-muted-foreground">
-                    Trading Desk
-                  </div>
-                  <p className="truncate text-sm font-semibold text-foreground">
-                    {selectedSummary ? selectedSummary.name : "No active portfolio"}
-                  </p>
-                </div>
-                {selectedSummary ? (
-                  <div className="hidden items-center gap-2 rounded-[12px] border border-white/6 bg-white/[0.03] px-3 py-2 md:flex">
-                    <span className="text-xs uppercase tracking-[0.18em] text-muted-foreground">Desk Value</span>
-                    <span className="font-mono text-sm text-foreground">{money.format(currentValue)}</span>
-                  </div>
-                ) : null}
+    <>
+      <div className="app-shell min-h-screen">
+        <div className="mx-auto max-w-[1680px] px-4 py-4 sm:px-6 sm:py-6 xl:px-8">
+          {screen === "create" ? (
+            <div className="grid min-h-screen content-start gap-6 py-4 lg:py-10">
+              <div className="mx-auto grid w-full max-w-[1120px] gap-6">
+                <CreateWorkspaceSetup
+                  error={workspaceError}
+                  onChange={setWorkspaceStartDate}
+                  onOpenBrowser={workspacesQuery.data?.length ? openWorkspaceBrowser : undefined}
+                  onOpenSettings={() => setShowSettingsModal(true)}
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    createWorkspaceMutation.mutate();
+                  }}
+                  pending={createWorkspaceMutation.isPending}
+                  savedCount={workspacesQuery.data?.length ?? 0}
+                  settingsDisabled={settingsQuery.isLoading || settingsQuery.isError}
+                  startDate={workspaceStartDate}
+                />
               </div>
             </div>
-
-            <div className="flex flex-wrap items-center justify-end gap-2">
-              <Badge className="hidden sm:inline-flex" variant={agentConfigured ? "secondary" : "outline"}>
-                {agentConfigured ? "Agent Configured" : "Setup Required"}
-              </Badge>
-              <Button onClick={() => setShowCreateModal(true)} size="sm" variant="outline">
-                <FolderPlus className="h-4 w-4" />
-                New Portfolio
-              </Button>
-              <Button onClick={() => setShowAgentDrawer(true)} size="sm" variant="secondary">
-                <Bot className="h-4 w-4" />
-                {agentConfigured ? "Open Analysis" : "Analysis Setup"}
-              </Button>
-              <Button
-                disabled={settingsQuery.isLoading || settingsQuery.isError}
-                onClick={() => setShowSettingsModal(true)}
-                size="sm"
-                variant="ghost"
-              >
-                <Settings2 className="h-4 w-4" />
-                Settings
-              </Button>
+          ) : screen === "browser" ? (
+            <div className="grid min-h-screen content-start gap-6 py-4 lg:py-10">
+              <div className="mx-auto grid w-full max-w-[1120px] gap-6">
+                <WorkspaceBrowser
+                  loading={workspacesQuery.isLoading}
+                  onCreateWorkspace={openWorkspaceCreate}
+                  onOpenSettings={() => setShowSettingsModal(true)}
+                  onPickWorkspace={selectWorkspace}
+                  onReturnToWorkspace={selectedWorkspaceId ? () => setScreen("workspace") : undefined}
+                  selectedWorkspaceId={selectedWorkspaceId}
+                  settingsDisabled={settingsQuery.isLoading || settingsQuery.isError}
+                  workspaces={workspacesQuery.data ?? []}
+                />
+              </div>
             </div>
-          </header>
+          ) : (
+            <div className="mx-auto grid w-full max-w-[1440px] content-start gap-4">
+              {selectedWorkspace ? (
+                <WorkspaceHero
+                  agentConfigured={agentConfigured}
+                  booksCount={books.length}
+                  onAddBenchmark={addBenchmark}
+                  onDeleteWorkspace={deleteSelectedWorkspace}
+                  onOpenAnalysis={() => setShowAgentDrawer(true)}
+                  onOpenBrowser={openWorkspaceBrowser}
+                  onOpenSettings={() => setShowSettingsModal(true)}
+                  onReturnToBooks={returnToBooksPhase}
+                  onRunSimulation={enterRunPhase}
+                  onSaveBankroll={(nextValue) => updateWorkspace({ initial_cash: nextValue })}
+                  onSetPrimaryBenchmark={setPrimaryBenchmark}
+                  onRemoveBenchmark={removeBenchmark}
+                  pendingWorkspaceUpdate={updateWorkspaceMutation.isPending}
+                  phase={workspacePhase}
+                  settingsDisabled={settingsQuery.isLoading || settingsQuery.isError}
+                  workspace={selectedWorkspace}
+                />
+              ) : null}
 
-          <section className="min-w-0">
-            {!portfoliosQuery.data?.length ? (
-              <Card className="grid min-h-[72vh] place-items-center border-white/8 bg-[linear-gradient(180deg,rgba(15,19,24,0.95),rgba(11,14,18,0.98))]">
-                <CardContent className="max-w-2xl px-6 py-16 text-center">
-                  <div className="mx-auto mb-5 inline-flex rounded-[16px] border border-secondary/20 bg-secondary/10 p-4 text-secondary">
-                    <CandlestickChart className="h-8 w-8" />
-                  </div>
-                  <div className="mb-3 inline-flex items-center rounded-[10px] border border-border/70 bg-background/80 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] text-muted-foreground">
-                    Terminal Ready
-                  </div>
-                  <h1 className="text-balance text-4xl leading-tight sm:text-5xl">
-                    Open a book and light up the replay desk.
-                  </h1>
-                  <p className="mx-auto mt-4 max-w-xl text-base leading-7 text-muted-foreground">
-                    Start a paper portfolio, stage your first position, and watch the book evolve against historical
-                    market data.
-                  </p>
-                  <div className="mt-8 flex flex-col justify-center gap-3 sm:flex-row">
-                    <Button onClick={() => setShowCreateModal(true)} size="lg">
-                      <FolderPlus className="h-4 w-4" />
-                      New Portfolio
-                    </Button>
-                    <Button onClick={() => setShowAgentDrawer(true)} size="lg" variant="secondary">
-                      <Bot className="h-4 w-4" />
-                      {agentConfigured ? "Open Analysis" : "Review Agent Setup"}
-                    </Button>
-                  </div>
-                </CardContent>
-              </Card>
-            ) : portfolioLoading ? (
-              <Card className="grid min-h-[72vh] place-items-center border-white/8 bg-[linear-gradient(180deg,rgba(15,19,24,0.95),rgba(11,14,18,0.98))]">
-                <CardContent className="px-6 py-16 text-center">
-                  <p className="text-lg font-medium text-foreground/80">Loading portfolio desk...</p>
-                </CardContent>
-              </Card>
-            ) : portfolioErrored ? (
-              <Card className="grid min-h-[72vh] place-items-center border-white/8 bg-[linear-gradient(180deg,rgba(15,19,24,0.95),rgba(11,14,18,0.98))]">
-                <CardContent className="max-w-lg px-6 py-16 text-center">
-                  <p className="text-lg font-medium text-destructive">Unable to load the selected portfolio.</p>
-                  <p className="mt-3 text-sm leading-6 text-muted-foreground">
-                    Refresh the page or pick a different portfolio from the desk rail.
-                  </p>
-                </CardContent>
-              </Card>
-            ) : portfolioReady ? (
-              <Dashboard
-                allocation={portfolio.allocation.data!}
-                bootstrap={bootstrapQuery.data}
-                detail={portfolio.detail.data!}
-                onAddPosition={() => setShowAddModal(true)}
-                onSelectPosition={setActivePosition}
-                onToggleBenchmark={() => setShowBenchmark((current) => !current)}
-                showBenchmark={showBenchmark}
-                timeseries={portfolio.timeseries.data!}
-              />
-            ) : (
-              <Card className="grid min-h-[72vh] place-items-center border-white/8 bg-[linear-gradient(180deg,rgba(15,19,24,0.95),rgba(11,14,18,0.98))]">
-                <CardContent className="max-w-lg px-6 py-16 text-center">
-                  <p className="text-lg font-medium text-foreground/80">Select a portfolio to open the desk.</p>
-                </CardContent>
-              </Card>
-            )}
-          </section>
+              {workspaceError && screen === "workspace" ? (
+                <Card className="border-destructive/20 bg-destructive/10">
+                  <CardContent className="px-6 py-4 text-sm text-destructive">{workspaceError}</CardContent>
+                </Card>
+              ) : null}
+
+              {loadingState ? (
+                <Card className="surface-panel border-border/80">
+                  <CardContent className="grid min-h-[320px] place-items-center px-6 py-8 text-center text-sm text-muted-foreground">
+                    <p>Loading workspace data...</p>
+                  </CardContent>
+                </Card>
+              ) : workspaceViewQuery.isError ? (
+                <Card className="surface-panel border-border/80">
+                  <CardContent className="grid min-h-[320px] place-items-center px-6 py-8 text-center">
+                    <div className="max-w-lg">
+                      <p className="text-lg font-semibold">Unable to load this workspace.</p>
+                      <p className="mt-2 text-sm leading-6 text-muted-foreground">
+                        Refresh the page or create a new workspace to continue.
+                      </p>
+                    </div>
+                  </CardContent>
+                </Card>
+              ) : workspacePhase === "books" ? (
+                <WorkspaceBooksPhase
+                  books={books}
+                  deletePendingBookId={deleteBookMutation.isPending ? (deleteBookMutation.variables ?? null) : null}
+                  onAddBook={openCreateBookModal}
+                  onDeleteBook={deleteBook}
+                  onEditBook={openEditBookModal}
+                  onSelectBook={selectBook}
+                  selectedBookId={selectedBookId}
+                  startDate={selectedWorkspace?.start_date ?? workspaceStartDate}
+                />
+              ) : (
+                <>
+                  <WorkspaceComparisonChart
+                    benchmarks={selectedWorkspace?.benchmarks ?? []}
+                    books={books}
+                    comparison={comparison}
+                    initialCash={selectedWorkspace?.initial_cash ?? 10000}
+                    isPlaying={isPlaying}
+                    onPlaybackRateChange={setPlaybackRate}
+                    onPlayPause={togglePlayback}
+                    onReset={resetPlayback}
+                    onSelectBook={selectBook}
+                    onSelectDateIndex={selectDateIndex}
+                    playbackRate={playbackRate}
+                    selectedBookId={selectedBookId}
+                    selectedDateIndex={clampedDateIndex}
+                  />
+
+                  <BookSnapshotPanel
+                    book={selectedBook}
+                    error={snapshotQuery.error}
+                    loading={snapshotQuery.isLoading || snapshotQuery.isFetching}
+                    snapshot={snapshotQuery.data}
+                  />
+                </>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
-      {showPortfolioRail ? (
-        <div className="fixed inset-0 z-30 xl:hidden">
-          <button
-            aria-label="Close portfolio rail"
-            className="absolute inset-0 bg-[rgba(29,23,19,0.45)] backdrop-blur-sm"
-            onClick={() => setShowPortfolioRail(false)}
-            type="button"
-          />
-          <aside className="absolute inset-y-3 left-3 w-[min(19rem,calc(100vw-1.5rem))] overflow-y-auto">
-            <div className="mb-3 flex items-center justify-between rounded-[18px] border border-white/8 bg-[rgba(10,14,18,0.92)] px-4 py-3 shadow-panel">
-              <div>
-                <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-muted-foreground">
-                  Navigation
-                </div>
-                <p className="text-sm font-semibold">Portfolio Rail</p>
-              </div>
-              <Button aria-label="Close portfolios" onClick={() => setShowPortfolioRail(false)} size="icon" variant="ghost">
-                <X className="h-4 w-4" />
-              </Button>
-            </div>
-            {portfolioRailContent}
-          </aside>
-        </div>
-      ) : null}
-
-      <CreatePortfolioModal
-        error={createError}
-        onChange={setCreateState}
-        onClose={() => setShowCreateModal(false)}
-        onSubmit={(event) => {
-          event.preventDefault();
-          setCreateError(null);
-          createMutation.mutate();
+      <CreateBookModal
+        config={bookModalMode === "edit" ? bookConfigQuery.data ?? null : null}
+        error={bookError}
+        loadingConfig={bookModalMode === "edit" && bookConfigQuery.isLoading}
+        mode={bookModalMode}
+        onClose={closeBookModal}
+        onSubmit={(payload) => {
+          if (bookModalMode === "edit") {
+            updateBookMutation.mutate(payload);
+            return;
+          }
+          createBookMutation.mutate(payload);
         }}
-        open={showCreateModal}
-        pending={createMutation.isPending}
-        state={createState}
+        open={showBookModal}
+        pending={createBookMutation.isPending || updateBookMutation.isPending}
       />
 
       <AgentSidebar
-        bootstrap={bootstrapQuery.data}
+        bootstrap={
+          bootstrapQuery.data ?? {
+            benchmark_ticker: "SPY",
+            capabilities: { agent: false, real_estate: false },
+            risk_free_rate: 0,
+          }
+        }
         onClose={() => setShowAgentDrawer(false)}
         open={showAgentDrawer}
-        portfolioId={selectedPortfolioId}
+        portfolioId={selectedBookId}
       />
 
-      {selectedPortfolioId ? (
-        <AddPositionModal
-          onClose={() => setShowAddModal(false)}
-          open={showAddModal}
-          portfolioId={selectedPortfolioId}
-          realEstateEnabled={bootstrapQuery.data.capabilities.real_estate}
-        />
-      ) : null}
-      <PositionDrawer onClose={() => setActivePosition(null)} position={activePosition} />
-      <SettingsModal
-        onClose={() => setShowSettingsModal(false)}
-        open={showSettingsModal}
-        settings={settingsQuery.data}
-      />
-    </main>
+      <SettingsModal onClose={() => setShowSettingsModal(false)} open={showSettingsModal} settings={settingsQuery.data} />
+    </>
   );
 }

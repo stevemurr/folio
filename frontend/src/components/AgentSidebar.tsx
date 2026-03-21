@@ -85,9 +85,10 @@ export default function AgentSidebar({ bootstrap, open, onClose, portfolioId }: 
                   <Bot className="h-3.5 w-3.5" />
                   Analysis Desk
                 </div>
-                <CardTitle className="text-2xl">Portfolio Analyst</CardTitle>
+                <CardTitle className="text-2xl">Book Analyst</CardTitle>
                 <CardDescription>
-                  Keep commentary off the main desk until you need a deeper read on performance and risk.
+                  Keep commentary off the main desk until you need a deeper read on a selected book's performance and
+                  risk.
                 </CardDescription>
               </div>
               <Button aria-label="Close analysis" onClick={onClose} size="icon" variant="ghost">
@@ -99,7 +100,7 @@ export default function AgentSidebar({ bootstrap, open, onClose, portfolioId }: 
               <Badge variant={agent.isConfigured ? "secondary" : "outline"}>
                 {agent.isConfigured ? "Configured" : "Setup Required"}
               </Badge>
-              <Badge variant="outline">{portfolioId ? "Portfolio Loaded" : "No Portfolio"}</Badge>
+              <Badge variant="outline">{portfolioId ? "Book Loaded" : "No Book"}</Badge>
             </div>
             <p className="text-sm leading-6 text-muted-foreground">{agent.statusMessage}</p>
           </CardHeader>
@@ -107,7 +108,7 @@ export default function AgentSidebar({ bootstrap, open, onClose, portfolioId }: 
           <CardContent className="flex min-h-0 flex-1 flex-col gap-4 pt-6">
             <div className="flex flex-wrap gap-2">
               <Button disabled={!agent.canAnalyze} onClick={agent.analyzePortfolio} type="button" variant="secondary">
-                {agent.analysisPending ? "Analyzing..." : "Analyze Portfolio"}
+                {agent.analysisPending ? "Analyzing..." : "Analyze Book"}
               </Button>
               <Button disabled={!agent.canClear} onClick={agent.clearHistory} type="button" variant="ghost">
                 {agent.clearPending ? "Clearing..." : "Clear Chat"}
@@ -124,7 +125,7 @@ export default function AgentSidebar({ bootstrap, open, onClose, portfolioId }: 
               <div className="flex items-center justify-between gap-4">
                 <div className="space-y-1">
                   <CardTitle className="text-xl">Conversation</CardTitle>
-                  <CardDescription>Persistent portfolio context per thread.</CardDescription>
+                  <CardDescription>Persistent book context per thread.</CardDescription>
                 </div>
                 <Badge variant="outline">{agent.isConfigured ? agent.badgeLabel : "Unavailable"}</Badge>
               </div>
@@ -137,7 +138,7 @@ export default function AgentSidebar({ bootstrap, open, onClose, portfolioId }: 
                     </div>
                   ) : !portfolioId ? (
                     <div className="grid min-h-[220px] place-items-center rounded-[20px] border border-dashed border-border/70 bg-background/40 px-6 text-center text-sm text-muted-foreground">
-                      <p>Select a portfolio to load its chat history.</p>
+                      <p>Select a book to load its chat history.</p>
                     </div>
                   ) : agent.historyLoading ? (
                     <div className="grid min-h-[220px] place-items-center rounded-[20px] border border-dashed border-border/70 bg-background/40 px-6 text-center text-sm text-muted-foreground">
@@ -200,7 +201,7 @@ export default function AgentSidebar({ bootstrap, open, onClose, portfolioId }: 
                   placeholder={
                     portfolioId
                       ? "Ask why Sharpe is low, compare to SPY, or inspect a position."
-                      : "Select a portfolio to chat."
+                      : "Select a book to chat."
                   }
                   value={agent.input}
                 />

@@ -16,14 +16,84 @@ class ApiError(ApiModel):
     message: str
 
 
-class PortfolioCreate(ApiModel):
+class WorkspaceCreate(ApiModel):
+    start_date: date
+
+
+class WorkspaceBenchmark(ApiModel):
+    ticker: str
+    is_primary: bool
+
+
+class WorkspaceUpdate(ApiModel):
+    initial_cash: Decimal | None = Field(default=None, gt=0)
+    benchmark_tickers: list[str] | None = None
+    primary_benchmark_ticker: str | None = None
+
+
+class WorkspaceSummary(ApiModel):
+    id: str
+    name: str
+    start_date: date
+    created_at: datetime
+    book_count: int
+
+
+class WorkspaceDetail(ApiModel):
+    id: str
+    name: str
+    start_date: date
+    created_at: datetime
+    book_count: int
+    initial_cash: float
+    benchmarks: list[WorkspaceBenchmark]
+
+
+class BookAllocationCreate(ApiModel):
+    ticker: str = Field(min_length=1, max_length=32)
+    asset_type: Literal["stock", "etf"]
+    weight: Decimal = Field(ge=0, le=100)
+
+
+class BookAllocationPreview(ApiModel):
+    ticker: str
+    asset_type: Literal["stock", "etf"]
+    weight: float
+
+
+BookStrategyKind = Literal["preset", "custom"]
+
+
+class BookCreate(ApiModel):
     name: str = Field(min_length=1, max_length=120)
     description: str = ""
-    initial_cash: Decimal = Field(gt=0)
+    strategy_kind: BookStrategyKind = "custom"
+    preset_id: str | None = Field(default=None, max_length=64)
+    allocations: list[BookAllocationCreate]
+    snapshot_as_of: date | None = None
 
 
-class PortfolioSummary(ApiModel):
+class BookUpdate(ApiModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str = ""
+    strategy_kind: BookStrategyKind = "custom"
+    preset_id: str | None = Field(default=None, max_length=64)
+    allocations: list[BookAllocationCreate]
+
+
+class BookConfig(ApiModel):
     id: str
+    workspace_id: str
+    name: str
+    description: str
+    strategy_kind: BookStrategyKind
+    preset_id: str | None = None
+    allocations: list[BookAllocationCreate]
+
+
+class BookSummary(ApiModel):
+    id: str
+    workspace_id: str
     name: str
     description: str
     created_at: datetime
@@ -31,10 +101,14 @@ class PortfolioSummary(ApiModel):
     initial_cash: float
     open_positions: int
     total_positions: int
+    strategy_kind: BookStrategyKind
+    preset_id: str | None = None
+    allocation_preview: list[BookAllocationPreview]
+    cash_weight: float
 
 
-class PortfolioMetrics(ApiModel):
-    portfolio_id: str
+class BookMetrics(ApiModel):
+    book_id: str
     total_value: float
     current_cash: float
     simple_roi: float
@@ -69,7 +143,7 @@ class PositionUpdate(ApiModel):
 
 class PositionWithMetrics(ApiModel):
     id: str
-    portfolio_id: str
+    book_id: str
     asset_type: str
     ticker: str
     shares: float
@@ -88,9 +162,9 @@ class PositionWithMetrics(ApiModel):
     weight: float
 
 
-class TimeSeriesPoint(ApiModel):
+class BookTimeSeriesPoint(ApiModel):
     date: date
-    portfolio_value: float
+    book_value: float
     cash: float
     benchmark_value: float | None = None
 
@@ -102,15 +176,53 @@ class AllocationSlice(ApiModel):
     weight: float
 
 
-class PortfolioDetail(ApiModel):
+class BookSnapshot(ApiModel):
     id: str
+    workspace_id: str
     name: str
     description: str
     created_at: datetime
     base_currency: str
     initial_cash: float
-    metrics: PortfolioMetrics
+    as_of: date
+    metrics: BookMetrics
     positions: list[PositionWithMetrics]
+    allocation: list[AllocationSlice]
+
+
+class WorkspaceComparisonPoint(ApiModel):
+    date: date
+    benchmark_values: dict[str, float | None]
+    book_values: dict[str, float]
+
+
+class WorkspaceComparison(ApiModel):
+    workspace_id: str
+    primary_benchmark_ticker: str
+    benchmark_tickers: list[str]
+    start_date: date
+    end_date: date
+    points: list[WorkspaceComparisonPoint]
+
+
+class WorkspaceView(ApiModel):
+    workspace: WorkspaceDetail
+    books: list[BookSummary]
+    comparison: WorkspaceComparison
+
+
+class BookCreateResult(ApiModel):
+    book: BookSummary
+    workspace_view: WorkspaceView
+    snapshot: BookSnapshot
+
+
+PortfolioAllocationCreate = BookAllocationCreate
+PortfolioCreate = BookCreate
+PortfolioSummary = BookSummary
+PortfolioMetrics = BookMetrics
+TimeSeriesPoint = BookTimeSeriesPoint
+PortfolioDetail = BookSnapshot
 
 
 class MarketSearchResult(ApiModel):

@@ -1,41 +1,36 @@
-import { useQueries, useQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 
 import { api } from "../api/client";
 
-export function usePortfolio(portfolioId: string | null) {
-  const enabled = Boolean(portfolioId);
-  const [detail, timeseries, allocation] = useQueries({
-    queries: [
-      {
-        queryKey: ["portfolio", portfolioId],
-        queryFn: () => api.getPortfolio(portfolioId!),
-        enabled,
-      },
-      {
-        queryKey: ["portfolio-timeseries", portfolioId],
-        queryFn: () => api.getTimeseries(portfolioId!),
-        enabled,
-      },
-      {
-        queryKey: ["portfolio-allocation", portfolioId],
-        queryFn: () => api.getAllocation(portfolioId!),
-        enabled,
-      },
-    ],
+export function useWorkspaceView(workspaceId: string | null) {
+  const enabled = Boolean(workspaceId);
+  return useQuery({
+    queryKey: ["workspace-view", workspaceId],
+    queryFn: ({ signal }) => api.getWorkspaceView(workspaceId!, signal),
+    enabled,
+    staleTime: 5 * 60 * 1000,
   });
+}
 
-  return {
-    detail,
-    timeseries,
-    allocation,
-    isLoading: detail.isLoading || timeseries.isLoading || allocation.isLoading,
-  };
+export function useBookSnapshot(bookId: string | null, asOf: string | null) {
+  const enabled = Boolean(bookId && asOf);
+  return useQuery({
+    queryKey: ["book-snapshot", bookId, asOf],
+    queryFn: ({ signal }) => api.getBookSnapshot(bookId!, asOf!, signal),
+    enabled,
+    placeholderData: (previous) => previous,
+    refetchOnWindowFocus: false,
+    retry: false,
+    staleTime: Infinity,
+    gcTime: 30 * 60 * 1000,
+  });
 }
 
 export function useBootstrap() {
   return useQuery({
     queryKey: ["bootstrap"],
     queryFn: api.getBootstrap,
+    staleTime: 5 * 60 * 1000,
   });
 }
 
@@ -43,12 +38,14 @@ export function useAppSettings() {
   return useQuery({
     queryKey: ["app-settings"],
     queryFn: api.getAppSettings,
+    staleTime: 5 * 60 * 1000,
   });
 }
 
-export function usePortfolios() {
+export function useWorkspaces() {
   return useQuery({
-    queryKey: ["portfolios"],
-    queryFn: api.listPortfolios,
+    queryKey: ["workspaces"],
+    queryFn: api.listWorkspaces,
+    staleTime: 5 * 60 * 1000,
   });
 }

@@ -43,16 +43,29 @@ def test_init_database_runs_revisioned_migrations(tmp_path: Path, monkeypatch: p
     monkeypatch.setenv("FOLIO_CONFIG", str(config_path))
     clear_database_caches()
 
-    assert init_database() == ["0001_initial", "0002_real_estate_markets"]
+    assert init_database() == [
+        "0001_initial",
+        "0002_real_estate_markets",
+        "0003_workspace_books",
+        "0004_workspace_strategy_model",
+    ]
     assert init_database() == []
 
     engine = get_engine()
     inspector = inspect(engine)
     assert "schema_migrations" in inspector.get_table_names()
+    assert "workspaces" in inspector.get_table_names()
+    assert "workspace_benchmarks" in inspector.get_table_names()
     assert "portfolios" in inspector.get_table_names()
+    assert "book_allocations" in inspector.get_table_names()
     with engine.connect() as connection:
         revisions = list(connection.execute(select(SchemaMigration.revision)).scalars())
-    assert revisions == ["0001_initial", "0002_real_estate_markets"]
+    assert revisions == [
+        "0001_initial",
+        "0002_real_estate_markets",
+        "0003_workspace_books",
+        "0004_workspace_strategy_model",
+    ]
 
     Base.metadata.drop_all(bind=engine)
     clear_database_caches()

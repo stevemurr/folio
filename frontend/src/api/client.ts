@@ -54,8 +54,74 @@ export type AppSettingsUpdate = {
   real_estate?: Partial<AppSettings["real_estate"]>;
 };
 
-export type PortfolioSummary = {
+export type WorkspaceSummary = {
   id: string;
+  name: string;
+  start_date: string;
+  created_at: string;
+  book_count: number;
+};
+
+export type WorkspaceBenchmark = {
+  ticker: string;
+  is_primary: boolean;
+};
+
+export type WorkspaceDetail = WorkspaceSummary & {
+  initial_cash: number;
+  benchmarks: WorkspaceBenchmark[];
+};
+
+export type WorkspaceUpdateRequest = {
+  initial_cash?: number;
+  benchmark_tickers?: string[];
+  primary_benchmark_ticker?: string;
+};
+
+export type BookAllocationCreate = {
+  ticker: string;
+  asset_type: "stock" | "etf";
+  weight: number;
+};
+
+export type BookAllocationPreview = {
+  ticker: string;
+  asset_type: "stock" | "etf";
+  weight: number;
+};
+
+export type BookStrategyKind = "preset" | "custom";
+
+export type BookCreateRequest = {
+  name: string;
+  description: string;
+  strategy_kind: BookStrategyKind;
+  preset_id?: string | null;
+  allocations: BookAllocationCreate[];
+  snapshot_as_of?: string;
+};
+
+export type BookUpdateRequest = {
+  name: string;
+  description: string;
+  strategy_kind: BookStrategyKind;
+  preset_id?: string | null;
+  allocations: BookAllocationCreate[];
+};
+
+export type BookConfig = {
+  id: string;
+  workspace_id: string;
+  name: string;
+  description: string;
+  strategy_kind: BookStrategyKind;
+  preset_id?: string | null;
+  allocations: BookAllocationCreate[];
+};
+
+export type BookSummary = {
+  id: string;
+  workspace_id: string;
   name: string;
   description: string;
   created_at: string;
@@ -63,10 +129,14 @@ export type PortfolioSummary = {
   initial_cash: number;
   open_positions: number;
   total_positions: number;
+  strategy_kind: BookStrategyKind;
+  preset_id?: string | null;
+  allocation_preview: BookAllocationPreview[];
+  cash_weight: number;
 };
 
-export type PortfolioMetrics = {
-  portfolio_id: string;
+export type BookMetrics = {
+  book_id: string;
   total_value: number;
   current_cash: number;
   simple_roi: number;
@@ -85,7 +155,7 @@ export type PortfolioMetrics = {
 
 export type PositionWithMetrics = {
   id: string;
-  portfolio_id: string;
+  book_id: string;
   asset_type: "stock" | "etf" | "real_estate";
   ticker: string;
   shares: number;
@@ -104,17 +174,6 @@ export type PositionWithMetrics = {
   weight: number;
 };
 
-export type PortfolioDetail = {
-  id: string;
-  name: string;
-  description: string;
-  created_at: string;
-  base_currency: string;
-  initial_cash: number;
-  metrics: PortfolioMetrics;
-  positions: PositionWithMetrics[];
-};
-
 export type AllocationSlice = {
   label: string;
   ticker: string;
@@ -122,11 +181,45 @@ export type AllocationSlice = {
   weight: number;
 };
 
-export type TimeSeriesPoint = {
+export type BookSnapshot = {
+  id: string;
+  workspace_id: string;
+  name: string;
+  description: string;
+  created_at: string;
+  base_currency: string;
+  initial_cash: number;
+  as_of: string;
+  metrics: BookMetrics;
+  positions: PositionWithMetrics[];
+  allocation: AllocationSlice[];
+};
+
+export type WorkspaceComparisonPoint = {
   date: string;
-  portfolio_value: number;
-  cash: number;
-  benchmark_value: number | null;
+  benchmark_values: Record<string, number | null>;
+  book_values: Record<string, number>;
+};
+
+export type WorkspaceComparison = {
+  workspace_id: string;
+  primary_benchmark_ticker: string;
+  benchmark_tickers: string[];
+  start_date: string;
+  end_date: string;
+  points: WorkspaceComparisonPoint[];
+};
+
+export type WorkspaceView = {
+  workspace: WorkspaceDetail;
+  books: BookSummary[];
+  comparison: WorkspaceComparison;
+};
+
+export type BookCreateResult = {
+  book: BookSummary;
+  workspace_view: WorkspaceView;
+  snapshot: BookSnapshot;
 };
 
 export type MarketSearchResult = {
@@ -161,6 +254,16 @@ export type ChatHistoryEntry = {
   role: "user" | "assistant";
   content: string;
   created_at: string;
+};
+
+export type PortfolioSummary = BookSummary;
+export type PortfolioMetrics = BookMetrics;
+export type PortfolioDetail = BookSnapshot;
+export type TimeSeriesPoint = {
+  date: string;
+  book_value: number;
+  cash: number;
+  benchmark_value: number | null;
 };
 
 export class ApiClientError extends Error {
@@ -317,42 +420,43 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(payload),
     }),
-  listPortfolios: () => request<PortfolioSummary[]>("/portfolios"),
-  createPortfolio: (payload: { name: string; description: string; initial_cash: number }) =>
-    request<PortfolioSummary>("/portfolios", {
+  listWorkspaces: () => request<WorkspaceSummary[]>("/workspaces"),
+  createWorkspace: (payload: { start_date: string }) =>
+    request<WorkspaceView>("/workspaces", {
       method: "POST",
       body: JSON.stringify(payload),
     }),
-  deletePortfolio: (portfolioId: string) =>
-    request<void>(`/portfolios/${portfolioId}`, { method: "DELETE" }),
-  getPortfolio: (portfolioId: string) => request<PortfolioDetail>(`/portfolios/${portfolioId}`),
-  getTimeseries: (portfolioId: string) =>
-    request<TimeSeriesPoint[]>(`/portfolios/${portfolioId}/timeseries`),
-  getAllocation: (portfolioId: string) =>
-    request<AllocationSlice[]>(`/portfolios/${portfolioId}/allocation`),
-  searchMarket: (query: string) =>
-    request<MarketSearchResult[]>(`/market/search?q=${encodeURIComponent(query)}`),
-  searchRealEstate: (query: string) =>
-    request<RealEstateSearchResult[]>(`/market/real-estate/search?q=${encodeURIComponent(query)}`),
-  addPosition: (
-    portfolioId: string,
-    payload: {
-      asset_type: "stock" | "etf" | "real_estate";
-      ticker: string;
-      entry_date: string;
-      shares: number;
-      notes: string;
-    },
-  ) =>
-    request<PositionWithMetrics>(`/portfolios/${portfolioId}/positions`, {
-      method: "POST",
-      body: JSON.stringify(payload),
-    }),
-  updatePosition: (positionId: string, payload: { notes?: string; close?: boolean }) =>
-    request<PositionWithMetrics>(`/positions/${positionId}`, {
+  updateWorkspace: (workspaceId: string, payload: WorkspaceUpdateRequest) =>
+    request<WorkspaceView>(`/workspaces/${workspaceId}`, {
       method: "PATCH",
       body: JSON.stringify(payload),
     }),
+  getWorkspace: (workspaceId: string) => request<WorkspaceDetail>(`/workspaces/${workspaceId}`),
+  getWorkspaceView: (workspaceId: string, signal?: AbortSignal) =>
+    request<WorkspaceView>(`/workspaces/${workspaceId}/view`, { signal }),
+  deleteWorkspace: (workspaceId: string) =>
+    request<void>(`/workspaces/${workspaceId}`, { method: "DELETE" }),
+  listBooks: (workspaceId: string) => request<BookSummary[]>(`/workspaces/${workspaceId}/books`),
+  createBook: (workspaceId: string, payload: BookCreateRequest) =>
+    request<BookCreateResult>(`/workspaces/${workspaceId}/books`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  getBookConfig: (bookId: string, signal?: AbortSignal) => request<BookConfig>(`/books/${bookId}/config`, { signal }),
+  updateBook: (bookId: string, payload: BookUpdateRequest) =>
+    request<BookCreateResult>(`/books/${bookId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  deleteBook: (bookId: string) => request<void>(`/books/${bookId}`, { method: "DELETE" }),
+  getWorkspaceComparison: (workspaceId: string) =>
+    request<WorkspaceComparison>(`/workspaces/${workspaceId}/comparison`),
+  getBookSnapshot: (bookId: string, asOf: string, signal?: AbortSignal) =>
+    request<BookSnapshot>(`/books/${bookId}/snapshot?as_of=${encodeURIComponent(asOf)}`, { signal }),
+  searchMarket: (query: string, signal?: AbortSignal) =>
+    request<MarketSearchResult[]>(`/market/search?q=${encodeURIComponent(query)}`, { signal }),
+  searchRealEstate: (query: string) =>
+    request<RealEstateSearchResult[]>(`/market/real-estate/search?q=${encodeURIComponent(query)}`),
   getAgentHistory: (portfolioId: string) =>
     request<ChatHistoryEntry[]>(`/agent/history/${encodeURIComponent(portfolioId)}`),
   clearAgentHistory: (portfolioId: string) =>

@@ -263,9 +263,9 @@ export function useAgentChat(bootstrap: BootstrapConfig | undefined, portfolioId
   const statusMessage = !agentConfigured
     ? "Add an OpenAI-compatible endpoint to ~/.folio/config.yaml to enable analysis."
     : !portfolioId
-      ? "Select a portfolio to start analysis and persistent chat."
+      ? "Select a book to start analysis and persistent chat."
       : connectionState === "connected"
-        ? "Portfolio context is live. Chat history is stored per portfolio."
+        ? "Book context is live. Chat history is stored per book."
         : connectionState === "connecting"
           ? "Connecting to the configured agent endpoint."
           : connectionState === "idle"

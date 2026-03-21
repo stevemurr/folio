@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.database import init_database
 from backend.errors import register_exception_handlers
-from backend.routers import agent, analytics, app, market, portfolios, positions
+from backend.routers import agent, app, books, market, workspaces
 from backend.scheduler import create_scheduler
 
 
@@ -27,10 +27,9 @@ app_instance.add_middleware(
 
 register_exception_handlers(app_instance)
 app_instance.include_router(app.router, prefix="/api/v1")
-app_instance.include_router(portfolios.router, prefix="/api/v1")
-app_instance.include_router(positions.router, prefix="/api/v1")
+app_instance.include_router(workspaces.router, prefix="/api/v1")
+app_instance.include_router(books.router, prefix="/api/v1")
 app_instance.include_router(market.router, prefix="/api/v1")
-app_instance.include_router(analytics.router, prefix="/api/v1")
 app_instance.include_router(agent.router, prefix="/api/v1")
 
 

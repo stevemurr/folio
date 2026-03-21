@@ -13,10 +13,10 @@ from backend.errors import ApiErrorException
 from backend.models.db import Portfolio, Position
 from backend.models.schemas import (
     AllocationSlice,
-    PortfolioDetail,
-    PortfolioMetrics,
+    BookMetrics,
+    BookSnapshot,
+    BookTimeSeriesPoint,
     PositionWithMetrics,
-    TimeSeriesPoint,
 )
 from backend.services.app_config_service import get_runtime_settings
 from backend.services.market_data import MarketDataService
@@ -24,9 +24,9 @@ from backend.services.market_data import MarketDataService
 
 @dataclass
 class PortfolioAnalysis:
-    metrics: PortfolioMetrics
+    metrics: BookMetrics
     positions: list[PositionWithMetrics]
-    timeseries: list[TimeSeriesPoint]
+    timeseries: list[BookTimeSeriesPoint]
     allocation: list[AllocationSlice]
 
 
@@ -39,59 +39,72 @@ class PortfolioEngine:
     def get_portfolio(self, portfolio_id: str) -> Portfolio:
         portfolio = self.session.get(Portfolio, portfolio_id)
         if portfolio is None:
-            raise ApiErrorException(404, "portfolio_not_found", "Portfolio not found.")
+            raise ApiErrorException(404, "book_not_found", "Book not found.")
         return portfolio
 
-    def build_portfolio_detail(self, portfolio_id: str) -> PortfolioDetail:
+    def build_portfolio_detail(
+        self,
+        portfolio_id: str,
+        *,
+        as_of: date | None = None,
+        start_date: date | None = None,
+    ) -> BookSnapshot:
         portfolio = self.get_portfolio(portfolio_id)
-        analysis = self.analyze_portfolio(portfolio)
-        return PortfolioDetail(
+        effective_start_date = start_date or self._default_start_date(portfolio, as_of or date.today())
+        analysis = self.analyze_portfolio(portfolio, as_of=as_of, start_date=effective_start_date)
+        effective_as_of = as_of or date.today()
+        if analysis.timeseries:
+            effective_as_of = analysis.timeseries[-1].date
+        return BookSnapshot(
             id=portfolio.id,
+            workspace_id=portfolio.workspace_id,
             name=portfolio.name,
             description=portfolio.description,
             created_at=portfolio.created_at,
             base_currency=portfolio.base_currency,
             initial_cash=float(portfolio.initial_cash),
+            as_of=effective_as_of,
             metrics=analysis.metrics,
             positions=analysis.positions,
+            allocation=analysis.allocation,
         )
 
-    def analyze_portfolio(self, portfolio: Portfolio) -> PortfolioAnalysis:
+    def analyze_portfolio(
+        self,
+        portfolio: Portfolio,
+        *,
+        as_of: date | None = None,
+        start_date: date | None = None,
+        benchmark_ticker: str | None = None,
+        price_frame: pd.DataFrame | None = None,
+    ) -> PortfolioAnalysis:
         positions = sorted(portfolio.positions, key=lambda item: (item.entry_date, item.id))
         initial_cash = float(portfolio.initial_cash)
-        benchmark_ticker = self.settings.market.benchmark_ticker.upper()
+        benchmark_ticker = benchmark_ticker or self._benchmark_ticker_for_portfolio(portfolio)
         risk_free_rate = self.settings.market.risk_free_rate / 100
+        effective_as_of = min(as_of or date.today(), date.today())
+        effective_start_date = start_date or self._default_start_date(portfolio, effective_as_of)
 
-        if not positions:
-            metrics = PortfolioMetrics(
-                portfolio_id=portfolio.id,
-                total_value=initial_cash,
-                current_cash=initial_cash,
-                simple_roi=0.0,
-                annualized_return=None,
-                sharpe_ratio=None,
-                benchmark_sharpe_ratio=None,
-                relative_sharpe=None,
-                alpha=None,
-                beta=None,
-                benchmark_return=None,
-                benchmark_ticker=benchmark_ticker,
-                risk_free_rate=self.settings.market.risk_free_rate,
-                position_count=0,
-                open_position_count=0,
-            )
-            return PortfolioAnalysis(
-                metrics=metrics,
-                positions=[],
-                timeseries=[],
-                allocation=[AllocationSlice(label="Cash", ticker="CASH", value=initial_cash, weight=1.0)],
-            )
+        if effective_as_of < effective_start_date:
+            raise ApiErrorException(422, "invalid_as_of", "Snapshot date cannot be earlier than the book start date.")
 
-        start_date = min(position.entry_date for position in positions)
-        end_date = max([date.today(), *[position.exit_date or date.today() for position in positions]])
-        tracked_tickers = sorted({position.ticker for position in positions} | {benchmark_ticker})
-        price_frame = self.market_data.load_price_frame(tracked_tickers, start_date, end_date)
+        if price_frame is None:
+            tracked_tickers = sorted({position.ticker for position in positions} | {benchmark_ticker})
+            price_frame = self.market_data.load_price_frame(tracked_tickers, effective_start_date, effective_as_of)
+        else:
+            price_frame = price_frame.loc[
+                (price_frame.index >= pd.Timestamp(effective_start_date))
+                & (price_frame.index <= pd.Timestamp(effective_as_of))
+            ].copy()
+
         if price_frame.empty or benchmark_ticker not in price_frame:
+            if self._should_return_cash_only(portfolio, benchmark_ticker, effective_start_date, effective_as_of):
+                return self._cash_only_analysis(
+                    portfolio,
+                    initial_cash=initial_cash,
+                    benchmark_ticker=benchmark_ticker,
+                    snapshot_date=effective_as_of,
+                )
             raise ApiErrorException(503, "market_data_unavailable", "Benchmark market data is unavailable.")
 
         calendar = price_frame[benchmark_ticker].dropna().index.sort_values()
@@ -103,7 +116,6 @@ class PortfolioEngine:
 
         cash_flows = pd.Series(0.0, index=calendar)
         position_values = pd.DataFrame(index=calendar)
-        position_metrics: list[PositionWithMetrics] = []
 
         for position in positions:
             if position.ticker not in price_frame:
@@ -120,9 +132,13 @@ class PortfolioEngine:
             units = pd.Series(0.0, index=calendar)
             units.iloc[entry_idx:exit_idx] = shares
             position_values[position.id] = units * price_frame[position.ticker]
-            cash_flows.iloc[entry_idx] -= float(position.entry_price) * shares
+            if entry_idx < len(calendar):
+                cash_flows.iloc[entry_idx] -= float(position.entry_price) * shares
             if position.exit_date is not None and position.exit_price is not None and exit_idx < len(calendar):
                 cash_flows.iloc[exit_idx] += float(position.exit_price) * shares
+
+        if position_values.empty:
+            position_values = pd.DataFrame(0.0, index=calendar, columns=[])
 
         cash_series = pd.Series(initial_cash, index=calendar) + cash_flows.cumsum()
         portfolio_values = cash_series + position_values.sum(axis=1)
@@ -149,30 +165,43 @@ class PortfolioEngine:
         if benchmark_values is not None and not benchmark_values.empty:
             benchmark_return = float((benchmark_values.iloc[-1] / benchmark_values.iloc[0]) - 1)
 
+        position_metrics: list[PositionWithMetrics] = []
+        realized_position_count = 0
         open_positions = 0
+        snapshot_date = calendar[-1].date()
+
         for position in positions:
+            if position.entry_date > snapshot_date:
+                continue
+
+            realized_position_count += 1
             shares = float(position.shares)
-            current_price = float(position.exit_price) if position.exit_price is not None else float(
-                price_frame[position.ticker].ffill().iloc[-1]
-            )
-            is_open = position.exit_date is None
+            is_closed = position.exit_date is not None and position.exit_date <= snapshot_date
+            is_open = not is_closed
             if is_open:
                 open_positions += 1
-            current_value = shares * current_price
+
+            if is_closed and position.exit_price is not None:
+                current_price = float(position.exit_price)
+                effective_end = position.exit_date
+            else:
+                current_price = float(price_frame[position.ticker].ffill().iloc[-1])
+                effective_end = snapshot_date
+
+            current_value = shares * current_price if is_open else shares * current_price
             pnl = (current_price - float(position.entry_price)) * shares
             roi = (current_price - float(position.entry_price)) / float(position.entry_price)
-            effective_end = position.exit_date or calendar[-1].date()
             position_days = max((effective_end - position.entry_date).days, 0)
             position_ann_return = self._annualized_return(float(position.entry_price), current_price, position_days)
             series_start = self._calendar_index(calendar, position.entry_date)
-            series_end = len(calendar) if position.exit_date is None else self._calendar_index(calendar, position.exit_date)
+            series_end = len(calendar) if position.exit_date is None else min(self._calendar_index(calendar, position.exit_date), len(calendar))
             position_returns = price_frame[position.ticker].iloc[series_start:series_end].pct_change().dropna()
             position_sharpe = self._compute_sharpe(position_returns, risk_free_rate)
             weight = current_value / total_value if is_open and total_value else 0.0
             position_metrics.append(
                 PositionWithMetrics(
                     id=position.id,
-                    portfolio_id=position.portfolio_id,
+                    book_id=position.portfolio_id,
                     asset_type=position.asset_type,
                     ticker=position.ticker,
                     shares=shares,
@@ -181,7 +210,7 @@ class PortfolioEngine:
                     exit_price=float(position.exit_price) if position.exit_price is not None else None,
                     exit_date=position.exit_date,
                     notes=position.notes,
-                    status="open" if is_open else "closed",
+                    status="closed" if is_closed else "open",
                     current_price=current_price,
                     current_value=current_value,
                     dollar_pnl=pnl,
@@ -193,9 +222,9 @@ class PortfolioEngine:
             )
 
         timeseries = [
-            TimeSeriesPoint(
+            BookTimeSeriesPoint(
                 date=timestamp.date(),
-                portfolio_value=float(portfolio_values.loc[timestamp]),
+                book_value=float(portfolio_values.loc[timestamp]),
                 cash=float(cash_series.loc[timestamp]),
                 benchmark_value=float(benchmark_values.loc[timestamp]) if benchmark_values is not None else None,
             )
@@ -203,8 +232,8 @@ class PortfolioEngine:
         ]
 
         allocation = self._build_allocation(position_metrics, current_cash, total_value)
-        metrics = PortfolioMetrics(
-            portfolio_id=portfolio.id,
+        metrics = BookMetrics(
+            book_id=portfolio.id,
             total_value=total_value,
             current_cash=current_cash,
             simple_roi=simple_roi,
@@ -221,7 +250,7 @@ class PortfolioEngine:
             benchmark_return=benchmark_return,
             benchmark_ticker=benchmark_ticker,
             risk_free_rate=self.settings.market.risk_free_rate,
-            position_count=len(positions),
+            position_count=realized_position_count,
             open_position_count=open_positions,
         )
         return PortfolioAnalysis(
@@ -230,6 +259,41 @@ class PortfolioEngine:
             timeseries=timeseries,
             allocation=allocation,
         )
+
+    def analyze_portfolios(
+        self,
+        portfolios: list[Portfolio],
+        *,
+        start_date: date,
+        as_of: date | None = None,
+        primary_benchmark_ticker: str | None = None,
+        benchmark_tickers: list[str] | None = None,
+        price_frame: pd.DataFrame | None = None,
+    ) -> dict[str, PortfolioAnalysis]:
+        if not portfolios:
+            return {}
+
+        primary_benchmark_ticker = primary_benchmark_ticker or self._benchmark_ticker_for_portfolio(portfolios[0])
+        tracked_tickers = sorted(
+            {position.ticker for portfolio in portfolios for position in portfolio.positions}
+            | set(benchmark_tickers or [primary_benchmark_ticker])
+        )
+        effective_as_of = min(as_of or date.today(), date.today())
+        shared_frame = (
+            price_frame
+            if price_frame is not None
+            else self.market_data.load_price_frame(tracked_tickers, start_date, effective_as_of)
+        )
+        return {
+            portfolio.id: self.analyze_portfolio(
+                portfolio,
+                as_of=as_of,
+                start_date=start_date,
+                benchmark_ticker=primary_benchmark_ticker,
+                price_frame=shared_frame,
+            )
+            for portfolio in portfolios
+        }
 
     def assert_cash_valid(self, portfolio: Portfolio, positions: list[Position]) -> None:
         cash = float(portfolio.initial_cash)
@@ -246,7 +310,7 @@ class PortfolioEngine:
                 raise ApiErrorException(
                     409,
                     "insufficient_cash",
-                    f"Portfolio cash would become negative on {event_date.isoformat()}.",
+                    f"Book cash would become negative on {event_date.isoformat()}.",
                 )
 
     def _build_allocation(
@@ -279,9 +343,78 @@ class PortfolioEngine:
     def _calendar_index(self, calendar: pd.Index, target_date: date) -> int:
         timestamp = pd.Timestamp(target_date)
         index = calendar.searchsorted(timestamp, side="left")
-        if index >= len(calendar):
-            return len(calendar) - 1
         return int(index)
+
+    def _cash_only_analysis(
+        self,
+        portfolio: Portfolio,
+        *,
+        initial_cash: float,
+        benchmark_ticker: str,
+        snapshot_date: date,
+    ) -> PortfolioAnalysis:
+        metrics = BookMetrics(
+            book_id=portfolio.id,
+            total_value=initial_cash,
+            current_cash=initial_cash,
+            simple_roi=0.0,
+            annualized_return=None,
+            sharpe_ratio=None,
+            benchmark_sharpe_ratio=None,
+            relative_sharpe=None,
+            alpha=None,
+            beta=None,
+            benchmark_return=None,
+            benchmark_ticker=benchmark_ticker,
+            risk_free_rate=self.settings.market.risk_free_rate,
+            position_count=0,
+            open_position_count=0,
+        )
+        return PortfolioAnalysis(
+            metrics=metrics,
+            positions=[],
+            timeseries=[],
+            allocation=[
+                AllocationSlice(
+                    label="Cash",
+                    ticker="CASH",
+                    value=initial_cash,
+                    weight=1.0,
+                )
+            ],
+        )
+
+    def _default_start_date(self, portfolio: Portfolio, fallback: date) -> date:
+        if portfolio.workspace is not None:
+            return portfolio.workspace.start_date
+        if portfolio.positions:
+            return min(position.entry_date for position in portfolio.positions)
+        return fallback
+
+    def _benchmark_ticker_for_portfolio(self, portfolio: Portfolio) -> str:
+        workspace = portfolio.workspace
+        if workspace is not None:
+            for benchmark in workspace.benchmarks:
+                if benchmark.is_primary:
+                    return benchmark.ticker
+            if workspace.benchmarks:
+                return workspace.benchmarks[0].ticker
+        return self.settings.market.benchmark_ticker.upper()
+
+    def _should_return_cash_only(
+        self,
+        portfolio: Portfolio,
+        benchmark_ticker: str,
+        effective_start_date: date,
+        effective_as_of: date,
+    ) -> bool:
+        if portfolio.workspace is None:
+            return False
+        try:
+            next_market_day = self.market_data.resolve_price_on_or_after(benchmark_ticker, effective_start_date).date
+        except ApiErrorException:
+            return False
+        return effective_as_of < next_market_day
 
     def _compute_sharpe(self, returns: pd.Series, risk_free_rate: float) -> float | None:
         if len(returns) < 30:

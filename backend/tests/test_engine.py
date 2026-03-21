@@ -8,7 +8,7 @@ from backend.errors import ApiErrorException
 from backend.models.db import Position
 from backend.services.portfolio_engine import PortfolioEngine
 
-from .conftest import add_price_history, create_portfolio, recent_business_series
+from .conftest import add_price_history, create_portfolio, create_workspace, recent_business_series
 
 
 def test_cash_validation_rejects_negative_replay(db_session):
@@ -74,9 +74,10 @@ def test_cash_validation_allows_exit_funding_same_day_entry(db_session):
 
 
 def test_portfolio_analysis_reconstructs_values_and_allocation(db_session):
-    portfolio = create_portfolio(db_session, initial_cash=1_000)
     spy_series = recent_business_series(40, 100, 1)
     asset_series = recent_business_series(40, 100, 2)
+    workspace = create_workspace(db_session, start_date=asset_series[0][0])
+    portfolio = create_portfolio(db_session, initial_cash=1_000, workspace=workspace)
     add_price_history(db_session, "SPY", spy_series)
     add_price_history(db_session, "AAPL", asset_series)
 
@@ -99,6 +100,7 @@ def test_portfolio_analysis_reconstructs_values_and_allocation(db_session):
     assert analysis.metrics.current_cash == pytest.approx(800)
     assert analysis.metrics.sharpe_ratio is not None
     assert len(analysis.timeseries) == 40
+    assert analysis.timeseries[-1].book_value == pytest.approx(analysis.metrics.total_value)
     assert analysis.allocation[0].ticker == "CASH"
     open_position = next(item for item in analysis.positions if item.ticker == "AAPL")
     assert open_position.current_price == pytest.approx(178)
@@ -106,9 +108,10 @@ def test_portfolio_analysis_reconstructs_values_and_allocation(db_session):
 
 
 def test_portfolio_sharpe_requires_minimum_history(db_session):
-    portfolio = create_portfolio(db_session, initial_cash=1_000)
     spy_series = recent_business_series(10, 100, 1)
     asset_series = recent_business_series(10, 100, 2)
+    workspace = create_workspace(db_session, start_date=asset_series[0][0])
+    portfolio = create_portfolio(db_session, initial_cash=1_000, workspace=workspace)
     add_price_history(db_session, "SPY", spy_series)
     add_price_history(db_session, "AAPL", asset_series)
     db_session.add(

@@ -4,7 +4,18 @@ import uuid
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import Date, DateTime, ForeignKey, Index, Numeric, String, Text
+from sqlalchemy import (
+    Boolean,
+    Date,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -16,21 +27,77 @@ class Base(DeclarativeBase):
     pass
 
 
+class Workspace(Base):
+    __tablename__ = "workspaces"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    start_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    initial_cash: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False, default=Decimal("10000"))
+
+    benchmarks: Mapped[list["WorkspaceBenchmark"]] = relationship(
+        back_populates="workspace",
+        cascade="all, delete-orphan",
+        order_by="WorkspaceBenchmark.created_at",
+    )
+    portfolios: Mapped[list["Portfolio"]] = relationship(
+        back_populates="workspace",
+        cascade="all, delete-orphan",
+        order_by="Portfolio.created_at",
+    )
+
+
+class WorkspaceBenchmark(Base):
+    __tablename__ = "workspace_benchmarks"
+    __table_args__ = (UniqueConstraint("workspace_id", "ticker", name="uq_workspace_benchmark_ticker"),)
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    ticker: Mapped[str] = mapped_column(String(32), nullable=False)
+    is_primary: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+    workspace: Mapped[Workspace] = relationship(back_populates="benchmarks")
+
+
 class Portfolio(Base):
     __tablename__ = "portfolios"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     description: Mapped[str] = mapped_column(Text, default="", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     base_currency: Mapped[str] = mapped_column(String(3), default="USD", nullable=False)
     initial_cash: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    strategy_kind: Mapped[str] = mapped_column(String(16), default="custom", nullable=False)
+    preset_id: Mapped[str | None] = mapped_column(String(64))
 
+    allocations: Mapped[list["BookAllocation"]] = relationship(
+        back_populates="portfolio",
+        cascade="all, delete-orphan",
+        order_by="BookAllocation.sort_order",
+    )
     positions: Mapped[list["Position"]] = relationship(
         back_populates="portfolio",
         cascade="all, delete-orphan",
         order_by="Position.entry_date",
     )
+    workspace: Mapped[Workspace] = relationship(back_populates="portfolios")
+
+
+class BookAllocation(Base):
+    __tablename__ = "book_allocations"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    portfolio_id: Mapped[str] = mapped_column(ForeignKey("portfolios.id", ondelete="CASCADE"), index=True)
+    asset_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    ticker: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    weight: Mapped[Decimal] = mapped_column(Numeric(9, 4), nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    portfolio: Mapped[Portfolio] = relationship(back_populates="allocations")
 
 
 class Position(Base):

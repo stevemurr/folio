@@ -26,7 +26,7 @@ type Props = {
 export default function MetricsStrip({ metrics }: Props) {
   return (
     <section className="grid gap-3 xl:grid-cols-[minmax(0,1.4fr)_repeat(3,minmax(0,1fr))]">
-      <Card className="overflow-hidden border-primary/20 bg-[linear-gradient(135deg,rgba(242,139,61,0.18),rgba(19,24,30,0.92))]">
+      <Card className="surface-panel-primary overflow-hidden border-primary/20">
         <CardContent className="grid gap-5 px-6 py-6 sm:grid-cols-[auto_1fr] sm:items-end">
           <div className="space-y-3">
             <span className="block text-xs font-semibold uppercase tracking-[0.18em] text-primary/80">
@@ -36,7 +36,7 @@ export default function MetricsStrip({ metrics }: Props) {
             <span className="block text-sm leading-6 text-muted-foreground">Sharpe ratio</span>
           </div>
           <div className="grid gap-4 sm:justify-items-end">
-            <div className="rounded-[16px] border border-white/8 bg-white/[0.04] px-4 py-3">
+            <div className="surface-outline rounded-[16px] border border-border/70 px-4 py-3">
               <span className="block text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
                 Replay Return
               </span>
@@ -49,7 +49,7 @@ export default function MetricsStrip({ metrics }: Props) {
         </CardContent>
       </Card>
 
-      <Card className="border-white/8 bg-[linear-gradient(180deg,rgba(19,24,30,0.96),rgba(13,16,21,0.96))]">
+      <Card className="surface-panel border-border/80">
         <CardContent className="space-y-3 px-6 py-6">
           <span className="block text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
             Total Value
@@ -58,7 +58,7 @@ export default function MetricsStrip({ metrics }: Props) {
         </CardContent>
       </Card>
 
-      <Card className="border-white/8 bg-[linear-gradient(180deg,rgba(19,24,30,0.96),rgba(13,16,21,0.96))]">
+      <Card className="surface-panel border-border/80">
         <CardContent className="space-y-3 px-6 py-6">
           <span className="block text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
             Alpha vs {metrics.benchmark_ticker}
@@ -67,7 +67,7 @@ export default function MetricsStrip({ metrics }: Props) {
         </CardContent>
       </Card>
 
-      <Card className="border-white/8 bg-[linear-gradient(180deg,rgba(19,24,30,0.96),rgba(13,16,21,0.96))]">
+      <Card className="surface-panel border-border/80">
         <CardContent className="space-y-3 px-6 py-6">
           <span className="block text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
             Cash Remaining

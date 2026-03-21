@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, ClassVar
 
 import pandas as pd
 import yfinance as yf
@@ -18,6 +18,7 @@ from backend.services.real_estate_data import RealEstateDataService
 
 
 FETCH_BUFFER_DAYS = 7
+SEARCH_CACHE_TTL = timedelta(minutes=5)
 
 
 @dataclass
@@ -28,6 +29,8 @@ class ResolvedPrice:
 
 
 class MarketDataService:
+    _search_cache: ClassVar[dict[str, tuple[datetime, list[MarketSearchResult]]]] = {}
+
     def __init__(self, session: Session):
         self.session = session
         self.settings = get_runtime_settings(session)
@@ -88,14 +91,21 @@ class MarketDataService:
             )
 
     def search_tickers(self, query: str) -> list[MarketSearchResult]:
-        if not query.strip():
+        normalized_query = query.strip()
+        if not normalized_query:
             return []
+
+        cache_key = normalized_query.lower()
+        cached = self._search_cache.get(cache_key)
+        now = datetime.now(UTC)
+        if cached is not None and cached[0] > now:
+            return [item.model_copy(deep=True) for item in cached[1]]
 
         results: list[MarketSearchResult] = []
         search_cls = getattr(yf, "Search", None)
         if search_cls is not None:
             try:
-                search = search_cls(query, max_results=10)
+                search = search_cls(normalized_query, max_results=10)
                 for quote in getattr(search, "quotes", []) or []:
                     symbol = quote.get("symbol")
                     quote_type = (quote.get("quoteType") or "").lower()
@@ -113,14 +123,17 @@ class MarketDataService:
                 results = []
 
         if results:
-            return results[:10]
+            cached_results = results[:10]
+            self._search_cache[cache_key] = (now + SEARCH_CACHE_TTL, cached_results)
+            return [item.model_copy(deep=True) for item in cached_results]
 
-        candidate = self._normalize_ticker(query)
+        candidate = self._normalize_ticker(normalized_query)
         try:
             resolved = self.resolve_price_on_or_before(candidate, date.today())
         except ApiErrorException:
+            self._search_cache[cache_key] = (now + SEARCH_CACHE_TTL, [])
             return []
-        return [
+        fallback = [
             MarketSearchResult(
                 ticker=candidate,
                 name=f"{candidate} ({resolved.date.isoformat()})",
@@ -128,6 +141,8 @@ class MarketDataService:
                 exchange=None,
             )
         ]
+        self._search_cache[cache_key] = (now + SEARCH_CACHE_TTL, fallback)
+        return [item.model_copy(deep=True) for item in fallback]
 
     def resolve_price_on_or_before(self, ticker: str, target_date: date) -> ResolvedPrice:
         normalized = self._normalize_ticker(ticker)
@@ -144,6 +159,39 @@ class MarketDataService:
         if row is None:
             raise ApiErrorException(404, "invalid_ticker", f"No market data found for {normalized}.")
         return ResolvedPrice(ticker=normalized, date=row.date, close=row.close)
+
+    def resolve_price_on_or_after(self, ticker: str, target_date: date) -> ResolvedPrice:
+        return self.resolve_prices_on_or_after([ticker], target_date)[self._normalize_ticker(ticker)]
+
+    def resolve_prices_on_or_after(self, tickers: list[str], target_date: date) -> dict[str, ResolvedPrice]:
+        normalized = sorted({self._normalize_ticker(ticker) for ticker in tickers if ticker})
+        if not normalized:
+            return {}
+
+        end_date = max(target_date, date.today())
+        self.ensure_price_history(normalized, target_date, end_date)
+        rows = self.session.execute(
+            select(PriceCache)
+            .where(PriceCache.ticker.in_(normalized), PriceCache.date >= target_date)
+            .order_by(PriceCache.ticker.asc(), PriceCache.date.asc())
+        ).scalars().all()
+
+        resolved: dict[str, ResolvedPrice] = {}
+        for row in rows:
+            if row.ticker in resolved:
+                continue
+            resolved[row.ticker] = ResolvedPrice(ticker=row.ticker, date=row.date, close=row.close)
+
+        missing = [ticker for ticker in normalized if ticker not in resolved]
+        if missing:
+            missing_label = ", ".join(missing)
+            raise ApiErrorException(
+                404,
+                "invalid_ticker",
+                f"No market data found on or after {target_date.isoformat()} for {missing_label}.",
+            )
+
+        return resolved
 
     def get_latest_price(self, ticker: str) -> MarketPriceResponse:
         normalized = self._normalize_ticker(ticker)

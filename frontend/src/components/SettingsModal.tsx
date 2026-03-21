@@ -72,14 +72,24 @@ export default function SettingsModal({ open, settings, onClose }: Props) {
         },
       });
     },
-    onSuccess: async () => {
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["app-settings"] }),
-        queryClient.invalidateQueries({ queryKey: ["bootstrap"] }),
-        queryClient.invalidateQueries({ queryKey: ["portfolio"] }),
-        queryClient.invalidateQueries({ queryKey: ["portfolio-timeseries"] }),
-        queryClient.invalidateQueries({ queryKey: ["portfolio-allocation"] }),
-      ]);
+    onSuccess: async (updated) => {
+      queryClient.setQueryData(["app-settings"], updated);
+      queryClient.setQueryData(["bootstrap"], {
+        risk_free_rate: updated.market.risk_free_rate,
+        benchmark_ticker: updated.market.benchmark_ticker,
+        capabilities: updated.capabilities,
+      });
+
+      const marketChanged =
+        settings?.market.benchmark_ticker !== updated.market.benchmark_ticker ||
+        settings?.market.risk_free_rate !== updated.market.risk_free_rate;
+
+      if (marketChanged) {
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: ["workspace-view"] }),
+          queryClient.invalidateQueries({ queryKey: ["book-snapshot"] }),
+        ]);
+      }
       onClose();
     },
     onError: (mutationError) => {
