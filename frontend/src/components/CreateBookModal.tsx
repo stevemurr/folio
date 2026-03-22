@@ -2,9 +2,19 @@ import { useQuery } from "@tanstack/react-query";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { LoaderCircle, Search, Trash2, X } from "lucide-react";
 
-import { BookConfig, api, BookCreateRequest, MarketSearchResult, WorkspaceAvailabilityResponse } from "../api/client";
+import { BookConfig, api, BookCreateRequest, MarketSearchResult } from "../api/client";
+import {
+  availabilityMessage,
+  BookFormAllocation,
+  customAllocationsFromConfig,
+  formatLongDate,
+  initialPresetWeights,
+  parseWeight,
+  presetWeightsFromConfig,
+  validateWeights,
+} from "../lib/bookForm";
 import { cn } from "../lib/utils";
-import { GUIDED_RUN_PRESETS, presetById, weightsForPreset } from "../lib/guidedRun";
+import { GUIDED_RUN_PRESETS, presetById } from "../lib/guidedRun";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";
@@ -12,12 +22,7 @@ import { Input } from "./ui/input";
 import ModalShell from "./ui/modal-shell";
 import { Textarea } from "./ui/textarea";
 
-type CustomAllocation = {
-  ticker: string;
-  name: string;
-  asset_type: "stock" | "etf";
-  weight: string;
-};
+type CustomAllocation = BookFormAllocation;
 
 type Props = {
   collectionName?: string | null;
@@ -31,77 +36,6 @@ type Props = {
   pending: boolean;
   workspaceId: string | null;
 };
-
-function initialPresetWeights(presetId: string) {
-  return weightsForPreset(presetById(presetId));
-}
-
-function parseWeight(raw: string): number {
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function validateWeights(weights: number[]): string | null {
-  if (weights.some((weight) => weight < 0)) {
-    return "Book weights cannot be negative.";
-  }
-  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
-  if (totalWeight > 100) {
-    return "Book weights cannot exceed 100%.";
-  }
-  if (!weights.some((weight) => weight > 0)) {
-    return "Add at least one allocation with weight greater than zero.";
-  }
-  return null;
-}
-
-function customAllocationsFromConfig(config: BookConfig): CustomAllocation[] {
-  return config.allocations.map((allocation) => ({
-    ticker: allocation.ticker,
-    name: allocation.ticker,
-    asset_type: allocation.asset_type,
-    weight: String(allocation.weight),
-  }));
-}
-
-function presetWeightsFromConfig(config: BookConfig, presetId: string) {
-  const preset = presetById(presetId);
-  const weights = initialPresetWeights(presetId);
-  for (const allocation of config.allocations) {
-    if (preset.allocations.some((item) => item.ticker === allocation.ticker)) {
-      weights[allocation.ticker] = String(allocation.weight);
-    }
-  }
-  return weights;
-}
-
-function formatLongDate(value: string | null | undefined) {
-  if (!value) {
-    return "n/a";
-  }
-  return new Intl.DateTimeFormat("en-US", {
-    month: "long",
-    day: "numeric",
-    year: "numeric",
-  }).format(new Date(`${value}T00:00:00`));
-}
-
-function availabilityMessage(data: WorkspaceAvailabilityResponse | undefined): string | null {
-  if (!data) {
-    return null;
-  }
-  if (data.issues.length) {
-    return data.issues[0].message;
-  }
-  const blocked = data.tickers.find((item) => !item.available);
-  if (!blocked) {
-    return null;
-  }
-  if (blocked.first_tradable_date) {
-    return `${blocked.ticker} first becomes tradable on ${blocked.first_tradable_date}.`;
-  }
-  return `${blocked.ticker} has no market data for the shared opening session.`;
-}
 
 export default function CreateBookModal({
   collectionName,

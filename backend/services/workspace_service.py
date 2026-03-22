@@ -6,13 +6,12 @@ from decimal import Decimal, ROUND_DOWN
 
 import pandas as pd
 from sqlalchemy import delete, select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session
 
 from backend.errors import ApiErrorException
 from backend.models.db import BookAllocation, BookCollection, Portfolio, Position, Workspace
 from backend.models.schemas import (
     BookAllocationCreate,
-    BookAllocationPreview,
     BookConfig,
     BookCreate,
     BookSnapshot,
@@ -36,14 +35,27 @@ from backend.models.schemas import (
 )
 from backend.services.portfolio_engine import PortfolioEngine
 from backend.services.run_eligibility import RunEligibilityService, WorkspaceEligibilitySnapshot
+from backend.services.workspace_allocations import book_allocation_inputs, normalize_book_allocations
+from backend.services.workspace_comparison import (
+    benchmark_overlay_values,
+    benchmark_series,
+    empty_comparison,
+    resolve_comparison_request,
+)
+from backend.services.workspace_presenters import (
+    book_config,
+    book_summary,
+    collection_summary,
+    format_workspace_name,
+    workspace_detail,
+    workspace_summary,
+    workspace_view,
+)
+from backend.services.workspace_queries import load_book, load_collection, load_workspace, workspace_load_options
 
 
 DEFAULT_WORKSPACE_INITIAL_CASH = Decimal("10000")
 SHARE_PRECISION = Decimal("0.000001")
-
-
-def format_workspace_name(start_date: date) -> str:
-    return start_date.strftime("%B %d, %Y")
 
 
 class WorkspaceService:
@@ -55,10 +67,10 @@ class WorkspaceService:
     def list_workspaces(self) -> list[WorkspaceSummary]:
         workspaces = self.session.execute(
             select(Workspace)
-            .options(*self._workspace_load_options())
+            .options(*workspace_load_options())
             .order_by(Workspace.created_at.desc())
         ).scalars().all()
-        return [self._workspace_summary(workspace) for workspace in workspaces]
+        return [workspace_summary(workspace, self.eligibility.inspect_workspace(workspace).run_state) for workspace in workspaces]
 
     def create_workspace(self, payload: WorkspaceCreate) -> WorkspaceDetail:
         if payload.start_date > date.today():
@@ -80,7 +92,8 @@ class WorkspaceService:
             )
         )
         self.session.commit()
-        return self._workspace_detail(self.get_workspace(workspace.id))
+        refreshed = self.get_workspace(workspace.id)
+        return workspace_detail(refreshed, self.eligibility.workspace_run_state(refreshed))
 
     def update_workspace(self, workspace_id: str, payload: WorkspaceUpdate) -> WorkspaceDetail:
         workspace = self.get_workspace(workspace_id)
@@ -90,68 +103,26 @@ class WorkspaceService:
                 raise ApiErrorException(422, "workspace_invalid", "Workspace name is required.")
             workspace.name = cleaned_name
             self.session.commit()
-        return self._workspace_detail(self.get_workspace(workspace.id))
+        refreshed = self.get_workspace(workspace.id)
+        return workspace_detail(refreshed, self.eligibility.workspace_run_state(refreshed))
 
     def get_workspace(self, workspace_id: str) -> Workspace:
-        workspace = self.session.execute(
-            select(Workspace)
-            .options(*self._workspace_load_options())
-            .where(Workspace.id == workspace_id)
-        ).scalars().first()
-        if workspace is None:
-            raise ApiErrorException(404, "workspace_not_found", "Workspace not found.")
-        return workspace
+        return load_workspace(self.session, workspace_id)
 
     def get_collection(self, collection_id: str) -> BookCollection:
-        collection = self.session.execute(
-            select(BookCollection)
-            .options(
-                selectinload(BookCollection.portfolios).selectinload(Portfolio.positions),
-                selectinload(BookCollection.portfolios).selectinload(Portfolio.allocations),
-                selectinload(BookCollection.workspace)
-                .selectinload(Workspace.collections)
-                .selectinload(BookCollection.portfolios)
-                .selectinload(Portfolio.positions),
-                selectinload(BookCollection.workspace)
-                .selectinload(Workspace.collections)
-                .selectinload(BookCollection.portfolios)
-                .selectinload(Portfolio.allocations),
-            )
-            .where(BookCollection.id == collection_id)
-        ).scalars().first()
-        if collection is None:
-            raise ApiErrorException(404, "collection_not_found", "Collection not found.")
-        return collection
+        return load_collection(self.session, collection_id)
 
     def get_book(self, book_id: str) -> Portfolio:
-        book = self.session.execute(
-            select(Portfolio)
-            .options(
-                selectinload(Portfolio.positions),
-                selectinload(Portfolio.allocations),
-                selectinload(Portfolio.collection),
-                selectinload(Portfolio.collection)
-                .selectinload(BookCollection.workspace)
-                .selectinload(Workspace.collections)
-                .selectinload(BookCollection.portfolios)
-                .selectinload(Portfolio.positions),
-                selectinload(Portfolio.collection)
-                .selectinload(BookCollection.workspace)
-                .selectinload(Workspace.collections)
-                .selectinload(BookCollection.portfolios)
-                .selectinload(Portfolio.allocations),
-            )
-            .where(Portfolio.id == book_id)
-        ).scalars().first()
-        if book is None:
-            raise ApiErrorException(404, "book_not_found", "Book not found.")
-        return book
+        return load_book(self.session, book_id)
 
     def build_workspace_detail(self, workspace_id: str) -> WorkspaceDetail:
-        return self._workspace_detail(self.get_workspace(workspace_id))
+        workspace = self.get_workspace(workspace_id)
+        return workspace_detail(workspace, self.eligibility.workspace_run_state(workspace))
 
     def build_workspace_view(self, workspace_id: str) -> WorkspaceView:
-        return self._workspace_view(self.get_workspace(workspace_id))
+        workspace = self.get_workspace(workspace_id)
+        eligibility = self.eligibility.inspect_workspace(workspace)
+        return workspace_view(workspace, eligibility, self.eligibility)
 
     def delete_workspace(self, workspace_id: str) -> None:
         result = self.session.execute(
@@ -173,7 +144,8 @@ class WorkspaceService:
         )
         self.session.add(collection)
         self.session.commit()
-        return self._collection_summary(self.get_collection(collection.id))
+        refreshed = self.get_collection(collection.id)
+        return collection_summary(refreshed, self.eligibility.collection_run_state(refreshed))
 
     def update_collection(self, collection_id: str, payload: CollectionUpdate) -> CollectionSummary:
         collection = self.get_collection(collection_id)
@@ -198,18 +170,12 @@ class WorkspaceService:
                     book.description,
                     book.strategy_kind,
                     book.preset_id,
-                    [
-                        BookAllocationCreate(
-                            ticker=allocation.ticker,
-                            asset_type=allocation.asset_type,
-                            weight=allocation.weight,
-                        )
-                        for allocation in book.allocations
-                    ],
+                    book_allocation_inputs(book.allocations),
                 )
 
         self.session.commit()
-        return self._collection_summary(self.get_collection(collection.id))
+        refreshed = self.get_collection(collection.id)
+        return collection_summary(refreshed, self.eligibility.collection_run_state(refreshed))
 
     def delete_collection(self, collection_id: str) -> None:
         collection = self.session.get(BookCollection, collection_id)
@@ -222,14 +188,14 @@ class WorkspaceService:
         workspace = self.get_workspace(workspace_id)
         eligibility = self.eligibility.inspect_workspace(workspace)
         return [
-            self._book_summary(book, eligibility.book_states.get(book.id))
+            book_summary(book, eligibility.book_states.get(book.id, self.eligibility.book_run_state(book)))
             for collection in workspace.collections
             for book in collection.portfolios
         ]
 
     def get_book_config(self, book_id: str) -> BookConfig:
         book = self.get_book(book_id)
-        return self._book_config(book, self.eligibility.book_run_state(book))
+        return book_config(book, self.eligibility.book_run_state(book))
 
     def create_book(self, collection_id: str, payload: BookCreate) -> BookSummary:
         collection = self.get_collection(collection_id)
@@ -259,7 +225,8 @@ class WorkspaceService:
 
         self.session.add(book)
         self.session.commit()
-        return self._book_summary(self.get_book(book.id), self.eligibility.book_run_state(self.get_book(book.id)))
+        created = self.get_book(book.id)
+        return book_summary(created, self.eligibility.book_run_state(created))
 
     def update_book(self, book_id: str, payload: BookUpdate) -> BookSummary:
         book = self.get_book(book_id)
@@ -277,7 +244,7 @@ class WorkspaceService:
         )
         self.session.commit()
         updated_book = self.get_book(book_id)
-        return self._book_summary(updated_book, self.eligibility.book_run_state(updated_book))
+        return book_summary(updated_book, self.eligibility.book_run_state(updated_book))
 
     def delete_book(self, book_id: str) -> None:
         book = self.session.get(Portfolio, book_id)
@@ -289,23 +256,26 @@ class WorkspaceService:
     def build_comparison(self, workspace_id: str, payload: WorkspaceComparisonRequest) -> WorkspaceComparison:
         workspace = self.get_workspace(workspace_id)
         eligibility = self.eligibility.inspect_workspace(workspace)
-        benchmark_tickers, primary_ticker = self._resolved_comparison_request(payload)
+        benchmark_tickers, primary_ticker = resolve_comparison_request(
+            payload,
+            self.portfolio_engine.settings.market.benchmark_ticker.upper(),
+        )
         ready_collections = [
             collection
             for collection in workspace.collections
             if eligibility.collection_states.get(collection.id, RunState(status="draft", issues=[])).status == "ready"
         ]
-        benchmark_series = self._benchmark_series(ready_collections, benchmark_tickers, primary_ticker)
+        benchmark_items = benchmark_series(ready_collections, benchmark_tickers, primary_ticker)
         opening_session = eligibility.opening_session
 
         books = [book for collection in ready_collections for book in collection.portfolios]
         if opening_session is None or not books:
-            return self._empty_comparison(
+            return empty_comparison(
                 workspace=workspace,
                 opening_session=opening_session,
                 primary_benchmark_ticker=primary_ticker,
                 benchmark_tickers=benchmark_tickers,
-                benchmark_series=benchmark_series,
+                benchmark_items=benchmark_items,
             )
 
         tracked_tickers = sorted(
@@ -313,12 +283,12 @@ class WorkspaceService:
             | set(benchmark_tickers)
         )
         if not tracked_tickers:
-            return self._empty_comparison(
+            return empty_comparison(
                 workspace=workspace,
                 opening_session=opening_session,
                 primary_benchmark_ticker=primary_ticker,
                 benchmark_tickers=benchmark_tickers,
-                benchmark_series=benchmark_series,
+                benchmark_items=benchmark_items,
             )
 
         shared_frame = self.portfolio_engine.market_data.load_price_frame(tracked_tickers, opening_session, date.today())
@@ -331,16 +301,16 @@ class WorkspaceService:
         )
         first_analysis = next((analysis for analysis in analyses.values() if analysis.timeseries), None)
         if first_analysis is None:
-            return self._empty_comparison(
+            return empty_comparison(
                 workspace=workspace,
                 opening_session=opening_session,
                 primary_benchmark_ticker=primary_ticker,
                 benchmark_tickers=benchmark_tickers,
-                benchmark_series=benchmark_series,
+                benchmark_items=benchmark_items,
             )
 
         calendar = pd.Index([pd.Timestamp(item.date) for item in first_analysis.timeseries])
-        benchmark_values = self._benchmark_overlay_values(shared_frame, calendar, benchmark_series)
+        benchmark_values = benchmark_overlay_values(shared_frame, calendar, benchmark_items)
         points: list[WorkspaceComparisonPoint] = []
         for index, item in enumerate(first_analysis.timeseries):
             points.append(
@@ -361,7 +331,7 @@ class WorkspaceService:
             workspace_id=workspace.id,
             primary_benchmark_ticker=primary_ticker,
             benchmark_tickers=benchmark_tickers,
-            benchmark_series=benchmark_series,
+            benchmark_series=benchmark_items,
             start_date=points[0].date,
             end_date=points[-1].date,
             points=points,
@@ -425,7 +395,7 @@ class WorkspaceService:
         if normalized_kind == "custom":
             normalized_preset = None
 
-        normalized_allocations = self._normalize_allocations(allocations)
+        normalized_allocations = normalize_book_allocations(allocations)
         opening_session, resolved_prices = self.eligibility.validate_book_allocations(
             start_date=workspace.start_date,
             allocations=normalized_allocations,
@@ -476,290 +446,10 @@ class WorkspaceService:
         book.allocations = allocation_rows
         book.positions = position_rows
 
-    def _normalize_allocations(self, allocations: list[BookAllocationCreate]) -> list[BookAllocationCreate]:
-        positive_allocations = [item for item in allocations if item.weight > 0]
-        if not positive_allocations:
-            raise ApiErrorException(422, "book_invalid", "At least one allocation must have a weight greater than zero.")
-
-        total_weight = sum((item.weight for item in positive_allocations), Decimal("0"))
-        if total_weight > Decimal("100"):
-            raise ApiErrorException(422, "book_invalid", "Book weights cannot exceed 100%.")
-
-        normalized: list[BookAllocationCreate] = []
-        seen_tickers: set[str] = set()
-        for allocation in positive_allocations:
-            ticker = allocation.ticker.strip().upper()
-            if ticker in seen_tickers:
-                raise ApiErrorException(422, "book_invalid", f"Duplicate ticker {ticker} is not allowed.")
-            seen_tickers.add(ticker)
-            normalized.append(
-                BookAllocationCreate(
-                    ticker=ticker,
-                    asset_type=allocation.asset_type,
-                    weight=allocation.weight,
-                )
-            )
-        return normalized
-
     def _resolved_collection_name(self, workspace: Workspace, requested_name: str | None) -> str:
         if requested_name and requested_name.strip():
             return requested_name.strip()
         return f"Collection {len(workspace.collections) + 1}"
-
-    def _resolved_comparison_request(self, payload: WorkspaceComparisonRequest) -> tuple[list[str], str]:
-        normalized = self._normalize_benchmark_tickers(payload.benchmark_tickers)
-        default_ticker = self.portfolio_engine.settings.market.benchmark_ticker.upper()
-        primary = payload.primary_benchmark_ticker.strip().upper() if payload.primary_benchmark_ticker else default_ticker
-        if not normalized:
-            normalized = [primary]
-        elif primary not in normalized:
-            normalized = [primary, *normalized]
-        return normalized, primary
-
-    def _normalize_benchmark_tickers(self, tickers: list[str]) -> list[str]:
-        normalized: list[str] = []
-        seen: set[str] = set()
-        for ticker in tickers:
-            cleaned = ticker.strip().upper()
-            if not cleaned or cleaned in seen:
-                continue
-            seen.add(cleaned)
-            normalized.append(cleaned)
-        return normalized
-
-    def _benchmark_series(
-        self,
-        collections: list[BookCollection],
-        benchmark_tickers: list[str],
-        primary_benchmark_ticker: str,
-    ) -> list[WorkspaceComparisonBenchmarkSeries]:
-        bankrolls: list[Decimal] = []
-        seen_bankroll_keys: set[str] = set()
-        for collection in collections:
-            bankroll_key = self._decimal_key(collection.initial_cash)
-            if bankroll_key in seen_bankroll_keys:
-                continue
-            seen_bankroll_keys.add(bankroll_key)
-            bankrolls.append(collection.initial_cash)
-
-        include_bankroll_in_label = len(bankrolls) > 1
-        series: list[WorkspaceComparisonBenchmarkSeries] = []
-        for bankroll in bankrolls:
-            bankroll_key = self._decimal_key(bankroll)
-            for ticker in benchmark_tickers:
-                series.append(
-                    WorkspaceComparisonBenchmarkSeries(
-                        key=f"{bankroll_key}:{ticker}",
-                        ticker=ticker,
-                        label=f"{ticker} · {self._format_currency_label(bankroll)}"
-                        if include_bankroll_in_label
-                        else ticker,
-                        is_primary=ticker == primary_benchmark_ticker,
-                        initial_cash=float(bankroll),
-                    )
-                )
-        return series
-
-    @staticmethod
-    def _decimal_key(value: Decimal) -> str:
-        text = format(value, "f")
-        if "." in text:
-            text = text.rstrip("0").rstrip(".")
-        return text or "0"
-
-    @staticmethod
-    def _format_currency_label(value: Decimal) -> str:
-        amount = float(value)
-        if amount.is_integer():
-            return f"${int(amount):,}"
-        return f"${amount:,.2f}"
-
-    def _benchmark_overlay_values(
-        self,
-        shared_frame: pd.DataFrame,
-        calendar: pd.Index,
-        benchmark_series: list[WorkspaceComparisonBenchmarkSeries],
-    ) -> dict[str, list[float | None]]:
-        reindexed_frame = shared_frame.reindex(calendar)
-        for ticker in reindexed_frame.columns:
-            reindexed_frame[ticker] = reindexed_frame[ticker].ffill()
-
-        values: dict[str, list[float | None]] = {}
-        for series in benchmark_series:
-            if series.ticker not in reindexed_frame:
-                values[series.key] = [None for _ in calendar]
-                continue
-
-            ticker_series = reindexed_frame[series.ticker]
-            first_valid_at = ticker_series.first_valid_index()
-            if first_valid_at is None:
-                values[series.key] = [None for _ in calendar]
-                continue
-
-            start_value = ticker_series.loc[first_valid_at]
-            if pd.isna(start_value) or not start_value:
-                values[series.key] = [None for _ in calendar]
-                continue
-
-            series_values: list[float | None] = []
-            activated = False
-            for timestamp in calendar:
-                if not activated and timestamp == first_valid_at:
-                    activated = True
-                price = ticker_series.loc[timestamp]
-                if not activated or pd.isna(price):
-                    series_values.append(None)
-                    continue
-                series_values.append(float((price / start_value) * series.initial_cash))
-            values[series.key] = series_values
-        return values
-
-    def _empty_comparison(
-        self,
-        *,
-        workspace: Workspace,
-        opening_session: date | None,
-        primary_benchmark_ticker: str,
-        benchmark_tickers: list[str],
-        benchmark_series: list[WorkspaceComparisonBenchmarkSeries],
-    ) -> WorkspaceComparison:
-        start_date = opening_session or workspace.start_date
-        return WorkspaceComparison(
-            workspace_id=workspace.id,
-            primary_benchmark_ticker=primary_benchmark_ticker,
-            benchmark_tickers=benchmark_tickers,
-            benchmark_series=benchmark_series,
-            start_date=start_date,
-            end_date=start_date,
-            points=[],
-        )
-
-    def _workspace_summary(self, workspace: Workspace) -> WorkspaceSummary:
-        eligibility = self.eligibility.inspect_workspace(workspace)
-        return WorkspaceSummary(
-            id=workspace.id,
-            name=workspace.name,
-            start_date=workspace.start_date,
-            created_at=workspace.created_at,
-            book_count=self._book_count(workspace),
-            collection_count=len(workspace.collections),
-            run_state=eligibility.run_state,
-        )
-
-    def _workspace_detail(
-        self,
-        workspace: Workspace,
-        run_state: RunState | None = None,
-    ) -> WorkspaceDetail:
-        return WorkspaceDetail(
-            id=workspace.id,
-            name=workspace.name,
-            start_date=workspace.start_date,
-            created_at=workspace.created_at,
-            book_count=self._book_count(workspace),
-            collection_count=len(workspace.collections),
-            run_state=run_state or self.eligibility.workspace_run_state(workspace),
-        )
-
-    def _workspace_view(self, workspace: Workspace) -> WorkspaceView:
-        eligibility = self.eligibility.inspect_workspace(workspace)
-        return WorkspaceView(
-            workspace=self._workspace_detail(workspace, eligibility.run_state),
-            collections=[
-                self._collection_detail(collection, eligibility)
-                for collection in workspace.collections
-            ],
-        )
-
-    def _collection_summary(
-        self,
-        collection: BookCollection,
-        run_state: RunState | None = None,
-    ) -> CollectionSummary:
-        return CollectionSummary(
-            id=collection.id,
-            workspace_id=collection.workspace_id,
-            name=collection.name,
-            created_at=collection.created_at,
-            initial_cash=float(collection.initial_cash),
-            book_count=len(collection.portfolios),
-            run_state=run_state or self.eligibility.collection_run_state(collection),
-        )
-
-    def _collection_detail(
-        self,
-        collection: BookCollection,
-        eligibility: WorkspaceEligibilitySnapshot,
-    ) -> CollectionDetail:
-        return CollectionDetail(
-            id=collection.id,
-            workspace_id=collection.workspace_id,
-            name=collection.name,
-            created_at=collection.created_at,
-            initial_cash=float(collection.initial_cash),
-            book_count=len(collection.portfolios),
-            run_state=eligibility.collection_states.get(collection.id, self.eligibility.collection_run_state(collection)),
-            books=[
-                self._book_summary(book, eligibility.book_states.get(book.id))
-                for book in collection.portfolios
-            ],
-        )
-
-    def _book_summary(self, book: Portfolio, run_state: RunState | None = None) -> BookSummary:
-        preview = sorted(
-            [
-                BookAllocationPreview(
-                    ticker=allocation.ticker,
-                    asset_type=allocation.asset_type,
-                    weight=float(allocation.weight),
-                )
-                for allocation in book.allocations
-            ],
-            key=lambda item: item.weight,
-            reverse=True,
-        )
-        total_weight = sum(item.weight for item in preview)
-        collection = book.collection
-        return BookSummary(
-            id=book.id,
-            workspace_id=book.workspace_id,
-            collection_id=book.collection_id,
-            collection_name=collection.name if collection is not None else None,
-            name=book.name,
-            description=book.description,
-            created_at=book.created_at,
-            base_currency=book.base_currency,
-            initial_cash=float(book.initial_cash),
-            open_positions=sum(1 for position in book.positions if position.exit_date is None),
-            total_positions=len(book.positions),
-            strategy_kind=book.strategy_kind,
-            preset_id=book.preset_id,
-            allocation_preview=preview,
-            cash_weight=max(0.0, 100 - total_weight),
-            run_state=run_state or self.eligibility.book_run_state(book),
-        )
-
-    def _book_config(self, book: Portfolio, run_state: RunState | None = None) -> BookConfig:
-        collection = book.collection
-        return BookConfig(
-            id=book.id,
-            workspace_id=book.workspace_id,
-            collection_id=book.collection_id,
-            collection_name=collection.name if collection is not None else None,
-            name=book.name,
-            description=book.description,
-            strategy_kind=book.strategy_kind,
-            preset_id=book.preset_id,
-            allocations=[
-                BookAllocationCreate(
-                    ticker=allocation.ticker,
-                    asset_type=allocation.asset_type,
-                    weight=allocation.weight,
-                )
-                for allocation in book.allocations
-            ],
-            run_state=run_state or self.eligibility.book_run_state(book),
-        )
 
     def _book_workspace(self, book: Portfolio) -> Workspace:
         if book.collection is not None and book.collection.workspace is not None:
@@ -774,16 +464,6 @@ class WorkspaceService:
         if collection is None:
             raise ApiErrorException(409, "collection_not_found", "Book collection is unavailable.")
         return collection
-
-    def _book_count(self, workspace: Workspace) -> int:
-        return sum(len(collection.portfolios) for collection in workspace.collections)
-
-    @staticmethod
-    def _workspace_load_options():
-        return (
-            selectinload(Workspace.collections).selectinload(BookCollection.portfolios).selectinload(Portfolio.positions),
-            selectinload(Workspace.collections).selectinload(BookCollection.portfolios).selectinload(Portfolio.allocations),
-        )
 
     @staticmethod
     def _issues_message(run_state: RunState, fallback: str) -> str:

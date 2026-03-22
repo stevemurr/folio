@@ -171,15 +171,6 @@ class PositionBase(ApiModel):
     notes: str = ""
 
 
-class PositionCreate(PositionBase):
-    entry_date: date
-
-
-class PositionUpdate(ApiModel):
-    notes: str | None = None
-    close: bool = False
-
-
 class PositionWithMetrics(ApiModel):
     id: str
     book_id: str
@@ -282,33 +273,6 @@ class WorkspaceAvailabilityResponse(ApiModel):
     opening_session: date | None = None
     issues: list[RunStateIssue] = Field(default_factory=list)
     tickers: list[WorkspaceTickerAvailability]
-
-
-PortfolioAllocationCreate = BookAllocationCreate
-
-
-class PortfolioCreate(ApiModel):
-    name: str = Field(min_length=1, max_length=120)
-    description: str = ""
-    initial_cash: Decimal = Field(gt=0)
-    start_date: date | None = None
-    allocations: list[PortfolioAllocationCreate] | None = None
-
-
-class PortfolioSummary(ApiModel):
-    id: str
-    name: str
-    description: str
-    created_at: datetime
-    base_currency: str
-    initial_cash: float
-    open_positions: int
-    total_positions: int
-
-
-PortfolioMetrics = BookMetrics
-TimeSeriesPoint = BookTimeSeriesPoint
-PortfolioDetail = BookSnapshot
 
 
 class AnalyzeRequest(ApiModel):

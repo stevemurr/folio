@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -16,7 +17,22 @@ from backend.scheduler import create_scheduler
 
 frontend_dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
-app_instance = FastAPI(title="Folio", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_database()
+    scheduler = create_scheduler()
+    app.state.scheduler = scheduler
+    scheduler.start()
+    try:
+        yield
+    finally:
+        scheduler = getattr(app.state, "scheduler", None)
+        if scheduler:
+            scheduler.shutdown(wait=False)
+
+
+app_instance = FastAPI(title="Folio", version="0.1.0", lifespan=lifespan)
 app_instance.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -32,20 +48,6 @@ app_instance.include_router(collections.router, prefix="/api/v1")
 app_instance.include_router(books.router, prefix="/api/v1")
 app_instance.include_router(market.router, prefix="/api/v1")
 app_instance.include_router(agent.router, prefix="/api/v1")
-
-
-@app_instance.on_event("startup")
-async def on_startup() -> None:
-    init_database()
-    app_instance.state.scheduler = create_scheduler()
-    app_instance.state.scheduler.start()
-
-
-@app_instance.on_event("shutdown")
-async def on_shutdown() -> None:
-    scheduler = getattr(app_instance.state, "scheduler", None)
-    if scheduler:
-        scheduler.shutdown(wait=False)
 
 
 if frontend_dist.exists():

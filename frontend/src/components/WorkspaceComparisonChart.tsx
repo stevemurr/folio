@@ -8,22 +8,29 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { Pause, Play, Plus, RotateCcw, Star, X } from "lucide-react";
-
 import { BookSummary, WorkspaceComparison } from "../api/client";
 import { benchmarkAccent, bookAccent } from "../lib/bookAppearance";
+import {
+  bookReturn,
+  DEFAULT_BENCHMARK_OPTIONS,
+  downsampleSeries,
+  formatAxisDate,
+  formatCurrency,
+  formatLongDate,
+  formatPercent,
+  PLAYBACK_SPEEDS,
+  RenderPoint,
+  toTimestamp,
+  visibleWindowStartIndex,
+  ZoomLevel,
+  ZOOM_OPTIONS,
+} from "../lib/workspaceComparison";
+import { PlaybackRate } from "../lib/playback";
 import { cn } from "../lib/utils";
 import { Badge } from "./ui/badge";
-import { Button } from "./ui/button";
+import ComparisonOverlayControls from "./ComparisonOverlayControls";
+import ComparisonPlaybackControls from "./ComparisonPlaybackControls";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";
-import { Input } from "./ui/input";
-
-type PlaybackRate = 0.5 | 1 | 2 | 4;
-type ZoomLevel = "all" | "10y" | "5y" | "1y";
-type RenderPoint = Record<string, number | string | null> & {
-  date: string;
-  pointIndex: number;
-};
 
 type Props = {
   books: BookSummary[];
@@ -43,99 +50,6 @@ type Props = {
   selectedBookId: string | null;
   selectedDateIndex: number;
 };
-
-const PLAYBACK_SPEEDS: PlaybackRate[] = [0.5, 1, 2, 4];
-const DEFAULT_BENCHMARK_OPTIONS = ["SPY", "QQQ", "VTI", "DIA", "IWM", "TLT", "GLD"];
-const DAY_MS = 24 * 60 * 60 * 1000;
-const ZOOM_OPTIONS: Array<{
-  curve: "linear" | "monotone";
-  days: number | null;
-  id: ZoomLevel;
-  label: string;
-  maxPoints: number;
-}> = [
-  { id: "all", label: "All", days: null, maxPoints: 240, curve: "monotone" },
-  { id: "10y", label: "10Y", days: 3650, maxPoints: 320, curve: "monotone" },
-  { id: "5y", label: "5Y", days: 1825, maxPoints: 420, curve: "monotone" },
-  { id: "1y", label: "1Y", days: 365, maxPoints: 700, curve: "linear" },
-];
-
-function formatCurrency(value: number | null | undefined) {
-  if (value === null || value === undefined || Number.isNaN(value)) {
-    return "n/a";
-  }
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: 0,
-  }).format(value);
-}
-
-function formatPercent(value: number | null | undefined) {
-  if (value === null || value === undefined || Number.isNaN(value)) {
-    return "n/a";
-  }
-  return `${(value * 100).toFixed(2)}%`;
-}
-
-function formatAxisDate(value: string, zoom: ZoomLevel) {
-  const date = new Date(`${value}T00:00:00`);
-  if (zoom === "1y") {
-    return new Intl.DateTimeFormat("en-US", {
-      month: "short",
-      day: "numeric",
-    }).format(date);
-  }
-  return new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    year: "2-digit",
-  }).format(date);
-}
-
-function formatLongDate(value: string | null | undefined) {
-  if (!value) {
-    return "n/a";
-  }
-  return new Intl.DateTimeFormat("en-US", {
-    month: "long",
-    day: "numeric",
-    year: "numeric",
-  }).format(new Date(`${value}T00:00:00`));
-}
-
-function bookReturn(value: number | undefined, initialCash: number) {
-  if (value === undefined) {
-    return null;
-  }
-  return initialCash > 0 ? value / initialCash - 1 : null;
-}
-
-function toTimestamp(value: string) {
-  return new Date(`${value}T00:00:00`).getTime();
-}
-
-function downsampleSeries(points: RenderPoint[], maxPoints: number) {
-  if (points.length <= maxPoints) {
-    return points;
-  }
-
-  const lastIndex = points.length - 1;
-  const step = lastIndex / (maxPoints - 1);
-  const sampled: RenderPoint[] = [];
-
-  for (let index = 0; index < maxPoints; index += 1) {
-    const point = points[Math.round(index * step)];
-    if (!sampled.length || sampled[sampled.length - 1].pointIndex !== point.pointIndex) {
-      sampled.push(point);
-    }
-  }
-
-  if (sampled[sampled.length - 1]?.pointIndex !== points[lastIndex].pointIndex) {
-    sampled.push(points[lastIndex]);
-  }
-
-  return sampled;
-}
 
 export default function WorkspaceComparisonChart({
   books,
@@ -231,13 +145,7 @@ export default function WorkspaceComparisonChart({
     let startIndex = 0;
     const endIndex = clampedIndex;
 
-    if (zoomOption.days !== null) {
-      const cutoff = timestamps[endIndex] - zoomOption.days * DAY_MS;
-      startIndex = timestamps.findIndex((timestamp, index) => index <= endIndex && timestamp >= cutoff);
-      if (startIndex === -1) {
-        startIndex = 0;
-      }
-    }
+    startIndex = visibleWindowStartIndex(timestamps, endIndex, zoom);
 
     const rawData = points.slice(startIndex, endIndex + 1).map((point, offset) => ({
       ...point.book_values,
@@ -283,78 +191,17 @@ export default function WorkspaceComparisonChart({
           </div>
         </div>
 
-        <div className="surface-panel-muted rounded-[18px] border border-border/70 px-4 py-4">
-          <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
-            <div className="space-y-2">
-              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-                Overlays
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                {overlayTickers.map((ticker) => (
-                  <div
-                    className={cn(
-                      "inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.12em]",
-                      ticker === primaryBenchmarkTicker
-                        ? "border-primary/20 bg-primary/10 text-primary"
-                        : "border-border/70 bg-background/75 text-foreground",
-                    )}
-                    key={ticker}
-                  >
-                    <button onClick={() => onSetPrimaryOverlay(ticker)} type="button">
-                      {ticker}
-                    </button>
-                    {ticker === primaryBenchmarkTicker ? <Star className="h-3.5 w-3.5 fill-current" /> : null}
-                    {overlayTickers.length > 1 ? (
-                      <button
-                        aria-label={`Remove ${ticker}`}
-                        className="text-muted-foreground transition-colors hover:text-foreground"
-                        onClick={() => onRemoveOverlayTicker(ticker)}
-                        type="button"
-                      >
-                        <X className="h-3.5 w-3.5" />
-                      </button>
-                    ) : null}
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2">
-              {availableOverlayOptions.slice(0, 5).map((ticker) => (
-                <button
-                  className="rounded-full border border-border/70 bg-card/65 px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground transition-colors hover:text-foreground"
-                  key={ticker}
-                  onClick={() => onAddOverlayTicker(ticker)}
-                  type="button"
-                >
-                  {ticker}
-                </button>
-              ))}
-              <div className="inline-flex items-center gap-2 rounded-full border border-border/70 bg-background/75 px-2 py-1.5">
-                <Input
-                  className="h-auto w-24 border-0 bg-transparent px-1 py-0 text-xs font-semibold uppercase tracking-[0.12em] shadow-none focus-visible:ring-0"
-                  onChange={(event) => setCustomTicker(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      event.preventDefault();
-                      submitOverlayTicker();
-                    }
-                  }}
-                  placeholder="Ticker"
-                  value={customTicker}
-                />
-                <button
-                  aria-label="Add overlay ticker"
-                  className="rounded-full bg-primary/10 p-1 text-primary transition-colors hover:bg-primary/15"
-                  onClick={submitOverlayTicker}
-                  type="button"
-                >
-                  <Plus className="h-3.5 w-3.5" />
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
+        <ComparisonOverlayControls
+          availableOverlayOptions={availableOverlayOptions}
+          customTicker={customTicker}
+          onAddOverlayTicker={onAddOverlayTicker}
+          onCustomTickerChange={setCustomTicker}
+          onRemoveOverlayTicker={onRemoveOverlayTicker}
+          onSetPrimaryOverlay={onSetPrimaryOverlay}
+          onSubmitOverlayTicker={submitOverlayTicker}
+          overlayTickers={overlayTickers}
+          primaryBenchmarkTicker={primaryBenchmarkTicker}
+        />
 
         <div className="grid gap-3 lg:grid-cols-4">
           <div className="surface-panel-muted rounded-[18px] border border-border/70 px-4 py-4">
@@ -462,109 +309,23 @@ export default function WorkspaceComparisonChart({
               </ResponsiveContainer>
             </div>
 
-            <div className="surface-panel-soft grid gap-4 rounded-[18px] border border-border/70 p-4">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-                    Timeline
-                  </div>
-                  <p className="mt-1 text-sm text-muted-foreground">
-                    Play the shared replay or scrub to inspect one date across every ready collection.
-                  </p>
-                </div>
-                <div className="text-right text-xs text-muted-foreground">
-                  {primaryBenchmarkTicker ? `Primary overlay: ${primaryBenchmarkTicker}` : "No primary overlay"}
-                </div>
-              </div>
-
-              <div className="flex flex-col gap-4 xl:flex-row xl:items-center">
-                <div className="flex items-center gap-2">
-                  <Button disabled={points.length <= 1} onClick={onPlayPause} variant="secondary">
-                    {isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
-                    {isPlaying ? "Pause" : "Play"}
-                  </Button>
-                  <Button disabled={!points.length} onClick={onReset} variant="ghost">
-                    <RotateCcw className="h-4 w-4" />
-                    Reset
-                  </Button>
-                </div>
-
-                <div className="flex-1">
-                  <input
-                    aria-label="Comparison timeline"
-                    className="h-2 w-full cursor-pointer accent-[hsl(var(--primary))]"
-                    max={Math.max(points.length - 1, 0)}
-                    min={0}
-                    onBlur={() => commitTimelineIndex()}
-                    onChange={(event) => setDraftIndex(Number(event.target.value))}
-                    onKeyUp={() => commitTimelineIndex()}
-                    onMouseUp={() => commitTimelineIndex()}
-                    onTouchEnd={() => commitTimelineIndex()}
-                    type="range"
-                    value={timelineIndex}
-                  />
-                </div>
-
-                <div className="surface-panel-muted min-w-[12rem] rounded-[16px] border border-border/70 px-4 py-3 text-left xl:text-right">
-                  <span className="block text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-                    Playback Head
-                  </span>
-                  <strong className="mt-1 block text-sm">{formatLongDate(timelinePoint?.date ?? comparison?.start_date)}</strong>
-                </div>
-              </div>
-
-              <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-                <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground xl:min-w-[22rem]">
-                  <span>{formatLongDate(points[0]?.date ?? comparison?.start_date)}</span>
-                  <span>{formatLongDate(points[points.length - 1]?.date ?? comparison?.end_date)}</span>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-4">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-                      Speed
-                    </span>
-                    {PLAYBACK_SPEEDS.map((rate) => (
-                      <button
-                        aria-label={`Playback speed ${rate}x`}
-                        className={cn(
-                          "rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors",
-                          playbackRate === rate
-                            ? "border-primary/20 bg-primary/10 text-primary"
-                            : "border-border/70 bg-card/65 text-muted-foreground hover:text-foreground",
-                        )}
-                        key={rate}
-                        onClick={() => onPlaybackRateChange(rate)}
-                        type="button"
-                      >
-                        {rate}x
-                      </button>
-                    ))}
-                  </div>
-
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-                      Zoom
-                    </span>
-                    {ZOOM_OPTIONS.map((option) => (
-                      <button
-                        className={cn(
-                          "rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors",
-                          zoom === option.id
-                            ? "border-secondary/25 bg-secondary/10 text-secondary"
-                            : "border-border/70 bg-card/65 text-muted-foreground hover:text-foreground",
-                        )}
-                        key={option.id}
-                        onClick={() => setZoom(option.id)}
-                        type="button"
-                      >
-                        {option.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </div>
+            <ComparisonPlaybackControls
+              comparisonEndDate={comparison?.end_date}
+              comparisonStartDate={comparison?.start_date}
+              isPlaying={isPlaying}
+              onCommitTimelineIndex={() => commitTimelineIndex()}
+              onDraftTimelineIndexChange={setDraftIndex}
+              onPlayPause={onPlayPause}
+              onPlaybackRateChange={onPlaybackRateChange}
+              onReset={onReset}
+              onZoomChange={setZoom}
+              playbackRate={playbackRate}
+              points={points}
+              primaryBenchmarkTicker={primaryBenchmarkTicker}
+              timelineDate={timelinePoint?.date}
+              timelineIndex={timelineIndex}
+              zoom={zoom}
+            />
 
             <div className="grid gap-3 lg:grid-cols-2 xl:grid-cols-3">
               {books.map((book) => {

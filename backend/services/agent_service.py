@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from backend.errors import ApiErrorException
 from backend.models.db import ChatHistory
-from backend.models.schemas import ChatHistoryEntry, PortfolioDetail, PositionWithMetrics
+from backend.models.schemas import BookSnapshot, ChatHistoryEntry, PositionWithMetrics
 from backend.services.app_config_service import get_runtime_settings
 from backend.services.portfolio_engine import PortfolioEngine
 
@@ -162,7 +162,7 @@ class AgentService:
         messages.append({"role": "user", "content": user_content})
         return messages
 
-    def _build_system_prompt(self, portfolio: PortfolioDetail) -> str:
+    def _build_system_prompt(self, portfolio: BookSnapshot) -> str:
         metrics = portfolio.metrics
         positions = sorted(portfolio.positions, key=lambda item: item.current_value, reverse=True)
         positions_block = "\n".join(self._format_position(position) for position in positions) or "None"

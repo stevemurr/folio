@@ -1,15 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { ApiClientError, BookCreateRequest, WorkspaceSummary, api } from "./api/client";
-import AgentSidebar from "./components/AgentSidebar";
-import BookSnapshotPanel from "./components/BookSnapshotPanel";
-import CreateBookModal from "./components/CreateBookModal";
 import CreateWorkspaceSetup from "./components/CreateWorkspaceSetup";
-import SettingsModal from "./components/SettingsModal";
 import WorkspaceBooksPhase from "./components/WorkspaceBooksPhase";
 import WorkspaceBrowser from "./components/WorkspaceBrowser";
-import WorkspaceComparisonChart from "./components/WorkspaceComparisonChart";
 import WorkspaceHero from "./components/WorkspaceHero";
 import WorkspaceTopBar from "./components/WorkspaceTopBar";
 import { Card, CardContent } from "./components/ui/card";
@@ -21,15 +16,12 @@ import {
   useWorkspaceView,
   useWorkspaces,
 } from "./hooks/usePortfolio";
+import { useWorkspacePlayback } from "./hooks/useWorkspacePlayback";
 import { defaultGuidedRunDate } from "./lib/guidedRun";
 
-type PlaybackRate = 0.5 | 1 | 2 | 4;
 type WorkspacePhase = "books" | "run";
 type WorkspaceScreen = "create" | "browser" | "workspace";
 type BookModalMode = "create" | "edit";
-
-const BASE_PLAYBACK_INTERVAL_MS = 180;
-const MAX_PLAYBACK_STEPS = 180;
 
 function errorMessage(error: unknown, fallback: string): string {
   if (error instanceof ApiClientError) {
@@ -38,28 +30,11 @@ function errorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
-function buildPlaybackPath(length: number): number[] {
-  if (length <= 1) {
-    return length ? [0] : [];
-  }
-
-  const steps = Math.min(length, MAX_PLAYBACK_STEPS);
-  const indices = new Set<number>();
-  for (let step = 0; step < steps; step += 1) {
-    indices.add(Math.round((step * (length - 1)) / (steps - 1)));
-  }
-
-  return [...indices].sort((left, right) => left - right);
-}
-
-function nextPlaybackIndex(path: number[], currentIndex: number): number | null {
-  for (const index of path) {
-    if (index > currentIndex) {
-      return index;
-    }
-  }
-  return null;
-}
+const AgentSidebar = lazy(() => import("./components/AgentSidebar"));
+const BookSnapshotPanel = lazy(() => import("./components/BookSnapshotPanel"));
+const CreateBookModal = lazy(() => import("./components/CreateBookModal"));
+const SettingsModal = lazy(() => import("./components/SettingsModal"));
+const WorkspaceComparisonChart = lazy(() => import("./components/WorkspaceComparisonChart"));
 
 export default function App() {
   const queryClient = useQueryClient();
@@ -80,10 +55,6 @@ export default function App() {
   const [editingBookId, setEditingBookId] = useState<string | null>(null);
   const [showAgentDrawer, setShowAgentDrawer] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
-  const [selectedDateIndex, setSelectedDateIndex] = useState(0);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [playbackRate, setPlaybackRate] = useState<PlaybackRate>(1);
-  const [requestedSnapshotDate, setRequestedSnapshotDate] = useState<string | null>(null);
   const [overlayTickers, setOverlayTickers] = useState<string[]>([]);
   const [primaryOverlayTicker, setPrimaryOverlayTicker] = useState<string | null>(null);
 
@@ -110,7 +81,13 @@ export default function App() {
   const comparison = comparisonQuery.data ?? null;
   const comparisonPoints = comparison?.points ?? [];
   const activeBooks = workspacePhase === "run" ? runnableBooks : books;
-  const clampedDateIndex = comparisonPoints.length ? Math.min(selectedDateIndex, comparisonPoints.length - 1) : 0;
+  const playback = useWorkspacePlayback({
+    comparisonDates: comparisonPoints.map((point) => point.date),
+    fallbackSelectedDate: selectedWorkspace?.run_state.opening_session ?? selectedWorkspace?.start_date ?? null,
+    selectedBookId,
+    workspacePhase,
+  });
+  const clampedDateIndex = playback.clampedDateIndex;
   const selectedDate =
     comparisonPoints[clampedDateIndex]?.date ??
     selectedWorkspace?.run_state.opening_session ??
@@ -120,8 +97,7 @@ export default function App() {
     () => activeBooks.find((book) => book.id === selectedBookId) ?? books.find((book) => book.id === selectedBookId) ?? null,
     [activeBooks, books, selectedBookId],
   );
-  const snapshotQuery = useBookSnapshot(selectedBookId, requestedSnapshotDate, primaryOverlayTicker);
-  const playbackPath = useMemo(() => buildPlaybackPath(comparisonPoints.length), [comparisonPoints.length]);
+  const snapshotQuery = useBookSnapshot(selectedBookId, playback.requestedSnapshotDate, primaryOverlayTicker);
   const agentConfigured = Boolean(bootstrapQuery.data?.capabilities.agent);
   const readyCollectionCount = readyCollections.length;
   const blockedCollectionCount = collections.filter((collection) => collection.run_state.status === "blocked").length;
@@ -132,12 +108,6 @@ export default function App() {
     enabled: showBookModal && bookModalMode === "edit" && Boolean(editingBookId),
     staleTime: 5 * 60 * 1000,
   });
-
-  function resetPlayback() {
-    setSelectedDateIndex(0);
-    setIsPlaying(false);
-    setRequestedSnapshotDate(null);
-  }
 
   function invalidateWorkspaceQueries(workspaceId: string | null) {
     if (!workspaceId) {
@@ -166,7 +136,7 @@ export default function App() {
     setSelectedBookId(null);
     setActiveCollectionId(null);
     setWorkspacePhase("books");
-    resetPlayback();
+    playback.resetPlayback();
     setScreen("workspace");
   }
 
@@ -199,40 +169,19 @@ export default function App() {
       return;
     }
     setWorkspacePhase("run");
-    resetPlayback();
+    playback.resetPlayback();
   }
 
   function returnToBooksPhase() {
     setWorkspacePhase("books");
-    resetPlayback();
-  }
-
-  function selectDateIndex(index: number) {
-    const max = Math.max(comparisonPoints.length - 1, 0);
-    const next = Math.min(Math.max(index, 0), max);
-    setSelectedDateIndex(next);
-    setIsPlaying(false);
+    playback.resetPlayback();
   }
 
   function selectBook(bookId: string) {
     setSelectedBookId(bookId);
-    setIsPlaying(false);
-  }
-
-  function togglePlayback() {
-    if (!comparisonPoints.length) {
-      return;
+    if (playback.isPlaying) {
+      playback.togglePlayback();
     }
-
-    if (isPlaying) {
-      setIsPlaying(false);
-      return;
-    }
-
-    if (clampedDateIndex >= comparisonPoints.length - 1) {
-      setSelectedDateIndex(0);
-    }
-    setIsPlaying(comparisonPoints.length > 1);
   }
 
   function deleteSelectedWorkspace() {
@@ -337,10 +286,10 @@ export default function App() {
       setSelectedBookId(null);
       setActiveCollectionId(null);
       setWorkspacePhase("books");
-      resetPlayback();
+      playback.resetPlayback();
       setScreen("browser");
     }
-  }, [selectedWorkspaceId, workspacesQuery.data, workspacesQuery.isLoading]);
+  }, [playback, selectedWorkspaceId, workspacesQuery.data, workspacesQuery.isLoading]);
 
   useEffect(() => {
     const defaultTicker = bootstrapQuery.data?.benchmark_ticker ?? "SPY";
@@ -369,53 +318,9 @@ export default function App() {
   useEffect(() => {
     if (workspacePhase === "run" && workspaceRunState?.status !== "ready") {
       setWorkspacePhase("books");
-      resetPlayback();
+      playback.resetPlayback();
     }
-  }, [workspacePhase, workspaceRunState?.status]);
-
-  useEffect(() => {
-    if (!comparisonPoints.length) {
-      setSelectedDateIndex(0);
-      setIsPlaying(false);
-      return;
-    }
-    if (selectedDateIndex > comparisonPoints.length - 1) {
-      setSelectedDateIndex(comparisonPoints.length - 1);
-    }
-  }, [comparisonPoints.length, selectedDateIndex]);
-
-  useEffect(() => {
-    if (workspacePhase !== "run" || !selectedBookId || !selectedDate) {
-      setRequestedSnapshotDate(null);
-      return;
-    }
-    if (isPlaying) {
-      return;
-    }
-    setRequestedSnapshotDate(selectedDate);
-  }, [isPlaying, selectedBookId, selectedDate, workspacePhase]);
-
-  useEffect(() => {
-    if (!isPlaying) {
-      return;
-    }
-    if (comparisonPoints.length <= 1) {
-      setIsPlaying(false);
-      return;
-    }
-
-    const nextIndex = nextPlaybackIndex(playbackPath, clampedDateIndex);
-    if (nextIndex === null) {
-      setIsPlaying(false);
-      return;
-    }
-
-    const timer = window.setTimeout(() => {
-      setSelectedDateIndex(nextIndex);
-    }, BASE_PLAYBACK_INTERVAL_MS / playbackRate);
-
-    return () => window.clearTimeout(timer);
-  }, [clampedDateIndex, comparisonPoints.length, isPlaying, playbackPath, playbackRate]);
+  }, [playback, workspacePhase, workspaceRunState?.status]);
 
   const createWorkspaceMutation = useMutation({
     mutationFn: () => api.createWorkspace({ start_date: workspaceStartDate }),
@@ -426,7 +331,7 @@ export default function App() {
       setSelectedBookId(null);
       setActiveCollectionId(null);
       setWorkspacePhase("books");
-      resetPlayback();
+      playback.resetPlayback();
       setScreen("workspace");
       await invalidateWorkspaceQueries(created.id);
     },
@@ -452,7 +357,7 @@ export default function App() {
     onSuccess: async () => {
       setWorkspaceError(null);
       setWorkspacePhase("books");
-      resetPlayback();
+      playback.resetPlayback();
       await invalidateWorkspaceQueries(selectedWorkspaceId);
     },
     onError: (error) => {
@@ -464,7 +369,7 @@ export default function App() {
     mutationFn: (collectionId: string) => api.deleteCollection(collectionId),
     onSuccess: async (_, collectionId) => {
       setWorkspacePhase("books");
-      resetPlayback();
+      playback.resetPlayback();
       setShowAgentDrawer(false);
       if (selectedBook && selectedBook.collection_id === collectionId) {
         setSelectedBookId(null);
@@ -488,7 +393,7 @@ export default function App() {
       closeBookModal();
       setSelectedBookId(created.id);
       setWorkspacePhase("books");
-      resetPlayback();
+      playback.resetPlayback();
       setScreen("workspace");
       await invalidateWorkspaceQueries(selectedWorkspaceId);
     },
@@ -509,7 +414,7 @@ export default function App() {
       closeBookModal();
       setSelectedBookId(updated.id);
       setWorkspacePhase("books");
-      resetPlayback();
+      playback.resetPlayback();
       setScreen("workspace");
       await Promise.all([
         invalidateWorkspaceQueries(selectedWorkspaceId),
@@ -537,7 +442,7 @@ export default function App() {
         setSelectedBookId(null);
         setActiveCollectionId(null);
         setWorkspacePhase("books");
-        resetPlayback();
+        playback.resetPlayback();
         setShowAgentDrawer(false);
         setScreen("browser");
         queryClient.removeQueries({ queryKey: ["book-snapshot"] });
@@ -556,7 +461,7 @@ export default function App() {
     mutationFn: (bookId: string) => api.deleteBook(bookId),
     onSuccess: async (_, deletedBookId) => {
       setWorkspacePhase("books");
-      resetPlayback();
+      playback.resetPlayback();
       setShowAgentDrawer(false);
       if (selectedBookId === deletedBookId) {
         setSelectedBookId(null);
@@ -702,31 +607,35 @@ export default function App() {
                 />
               ) : (
                 <>
-                  <WorkspaceComparisonChart
-                    books={runnableBooks}
-                    comparison={comparison}
-                    isPlaying={isPlaying}
-                    onAddOverlayTicker={addOverlayTicker}
-                    onPlaybackRateChange={setPlaybackRate}
-                    onPlayPause={togglePlayback}
-                    onRemoveOverlayTicker={removeOverlayTicker}
-                    onReset={resetPlayback}
-                    onSelectBook={selectBook}
-                    onSelectDateIndex={selectDateIndex}
-                    onSetPrimaryOverlay={setPrimaryOverlay}
-                    overlayTickers={overlayTickers}
-                    playbackRate={playbackRate}
-                    primaryBenchmarkTicker={primaryOverlayTicker}
-                    selectedBookId={selectedBookId}
-                    selectedDateIndex={clampedDateIndex}
-                  />
+                  <Suspense fallback={null}>
+                    <WorkspaceComparisonChart
+                      books={runnableBooks}
+                      comparison={comparison}
+                      isPlaying={playback.isPlaying}
+                      onAddOverlayTicker={addOverlayTicker}
+                      onPlaybackRateChange={playback.setPlaybackRate}
+                      onPlayPause={playback.togglePlayback}
+                      onRemoveOverlayTicker={removeOverlayTicker}
+                      onReset={playback.resetPlayback}
+                      onSelectBook={selectBook}
+                      onSelectDateIndex={playback.selectDateIndex}
+                      onSetPrimaryOverlay={setPrimaryOverlay}
+                      overlayTickers={overlayTickers}
+                      playbackRate={playback.playbackRate}
+                      primaryBenchmarkTicker={primaryOverlayTicker}
+                      selectedBookId={selectedBookId}
+                      selectedDateIndex={clampedDateIndex}
+                    />
+                  </Suspense>
 
-                  <BookSnapshotPanel
-                    book={selectedBook}
-                    error={snapshotQuery.error}
-                    loading={snapshotQuery.isLoading || snapshotQuery.isFetching}
-                    snapshot={snapshotQuery.data}
-                  />
+                  <Suspense fallback={null}>
+                    <BookSnapshotPanel
+                      book={selectedBook}
+                      error={snapshotQuery.error}
+                      loading={snapshotQuery.isLoading || snapshotQuery.isFetching}
+                      snapshot={snapshotQuery.data}
+                    />
+                  </Suspense>
                 </>
               )}
             </div>
@@ -734,39 +643,45 @@ export default function App() {
         </div>
       </div>
 
-      <CreateBookModal
-        collectionName={bookModalCollectionName}
-        config={bookModalMode === "edit" ? bookConfigQuery.data ?? null : null}
-        error={bookError}
-        loadingConfig={bookModalMode === "edit" && bookConfigQuery.isLoading}
-        mode={bookModalMode}
-        onClose={closeBookModal}
-        onSubmit={(payload) => {
-          if (bookModalMode === "edit") {
-            updateBookMutation.mutate(payload);
-            return;
-          }
-          createBookMutation.mutate(payload);
-        }}
-        open={showBookModal}
-        pending={createBookMutation.isPending || updateBookMutation.isPending}
-        workspaceId={selectedWorkspaceId}
-      />
+      <Suspense fallback={null}>
+        <CreateBookModal
+          collectionName={bookModalCollectionName}
+          config={bookModalMode === "edit" ? bookConfigQuery.data ?? null : null}
+          error={bookError}
+          loadingConfig={bookModalMode === "edit" && bookConfigQuery.isLoading}
+          mode={bookModalMode}
+          onClose={closeBookModal}
+          onSubmit={(payload) => {
+            if (bookModalMode === "edit") {
+              updateBookMutation.mutate(payload);
+              return;
+            }
+            createBookMutation.mutate(payload);
+          }}
+          open={showBookModal}
+          pending={createBookMutation.isPending || updateBookMutation.isPending}
+          workspaceId={selectedWorkspaceId}
+        />
+      </Suspense>
 
-      <AgentSidebar
-        bootstrap={
-          bootstrapQuery.data ?? {
-            benchmark_ticker: "SPY",
-            capabilities: { agent: false, real_estate: false },
-            risk_free_rate: 0,
+      <Suspense fallback={null}>
+        <AgentSidebar
+          bootstrap={
+            bootstrapQuery.data ?? {
+              benchmark_ticker: "SPY",
+              capabilities: { agent: false, real_estate: false },
+              risk_free_rate: 0,
+            }
           }
-        }
-        onClose={() => setShowAgentDrawer(false)}
-        open={showAgentDrawer}
-        portfolioId={selectedBookId}
-      />
+          onClose={() => setShowAgentDrawer(false)}
+          open={showAgentDrawer}
+          portfolioId={selectedBookId}
+        />
+      </Suspense>
 
-      <SettingsModal onClose={() => setShowSettingsModal(false)} open={showSettingsModal} settings={settingsQuery.data} />
+      <Suspense fallback={null}>
+        <SettingsModal onClose={() => setShowSettingsModal(false)} open={showSettingsModal} settings={settingsQuery.data} />
+      </Suspense>
     </>
   );
 }
