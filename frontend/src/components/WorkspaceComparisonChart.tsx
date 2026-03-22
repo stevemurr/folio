@@ -8,14 +8,15 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { Pause, Play, RotateCcw } from "lucide-react";
+import { Pause, Play, Plus, RotateCcw, Star, X } from "lucide-react";
 
-import { BookSummary, WorkspaceBenchmark, WorkspaceComparison } from "../api/client";
+import { BookSummary, WorkspaceComparison } from "../api/client";
 import { benchmarkAccent, bookAccent } from "../lib/bookAppearance";
 import { cn } from "../lib/utils";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";
+import { Input } from "./ui/input";
 
 type PlaybackRate = 0.5 | 1 | 2 | 4;
 type ZoomLevel = "all" | "10y" | "5y" | "1y";
@@ -25,22 +26,26 @@ type RenderPoint = Record<string, number | string | null> & {
 };
 
 type Props = {
-  benchmarks: WorkspaceBenchmark[];
   books: BookSummary[];
   comparison: WorkspaceComparison | null;
-  initialCash: number;
   isPlaying: boolean;
+  onAddOverlayTicker: (ticker: string) => void;
   onPlaybackRateChange: (rate: PlaybackRate) => void;
   onPlayPause: () => void;
+  onRemoveOverlayTicker: (ticker: string) => void;
   onReset: () => void;
   onSelectBook: (bookId: string) => void;
   onSelectDateIndex: (index: number) => void;
+  onSetPrimaryOverlay: (ticker: string) => void;
+  overlayTickers: string[];
   playbackRate: PlaybackRate;
+  primaryBenchmarkTicker: string | null;
   selectedBookId: string | null;
   selectedDateIndex: number;
 };
 
 const PLAYBACK_SPEEDS: PlaybackRate[] = [0.5, 1, 2, 4];
+const DEFAULT_BENCHMARK_OPTIONS = ["SPY", "QQQ", "VTI", "DIA", "IWM", "TLT", "GLD"];
 const DAY_MS = 24 * 60 * 60 * 1000;
 const ZOOM_OPTIONS: Array<{
   curve: "linear" | "monotone";
@@ -109,10 +114,6 @@ function toTimestamp(value: string) {
   return new Date(`${value}T00:00:00`).getTime();
 }
 
-function benchmarkDataKey(ticker: string) {
-  return `benchmark:${ticker}`;
-}
-
 function downsampleSeries(points: RenderPoint[], maxPoints: number) {
   if (points.length <= maxPoints) {
     return points;
@@ -137,33 +138,58 @@ function downsampleSeries(points: RenderPoint[], maxPoints: number) {
 }
 
 export default function WorkspaceComparisonChart({
-  benchmarks,
   books,
   comparison,
-  initialCash,
   isPlaying,
+  onAddOverlayTicker,
   onPlaybackRateChange,
   onPlayPause,
+  onRemoveOverlayTicker,
   onReset,
   onSelectBook,
   onSelectDateIndex,
+  onSetPrimaryOverlay,
+  overlayTickers,
   playbackRate,
+  primaryBenchmarkTicker,
   selectedBookId,
   selectedDateIndex,
 }: Props) {
   const [zoom, setZoom] = useState<ZoomLevel>("all");
   const [draftIndex, setDraftIndex] = useState<number | null>(null);
+  const [customTicker, setCustomTicker] = useState("");
   const commitTimerRef = useRef<number | null>(null);
   const points = comparison?.points ?? [];
   const clampedIndex = points.length ? Math.min(selectedDateIndex, points.length - 1) : 0;
   const currentPoint = points[clampedIndex] ?? null;
   const timelineIndex = draftIndex ?? clampedIndex;
   const timelinePoint = points[timelineIndex] ?? currentPoint;
-  const selectedBookValue = selectedBookId ? currentPoint?.book_values[selectedBookId] : null;
-  const primaryBenchmark = benchmarks.find((benchmark) => benchmark.is_primary) ?? benchmarks[0] ?? null;
-  const benchmarkValue = primaryBenchmark ? currentPoint?.benchmark_values[primaryBenchmark.ticker] ?? null : null;
+  const selectedBook = books.find((book) => book.id === selectedBookId) ?? books[0] ?? null;
+  const selectedBookValue = selectedBook ? currentPoint?.book_values[selectedBook.id] : null;
+  const selectedBookInitialCash = selectedBook?.initial_cash ?? 0;
+  const benchmarkSeries = useMemo(() => {
+    const deduped = new Map<string, NonNullable<WorkspaceComparison["benchmark_series"]>[number]>();
+    for (const series of comparison?.benchmark_series ?? []) {
+      const key = `${series.ticker}:${series.initial_cash}`;
+      if (!deduped.has(key)) {
+        deduped.set(key, series);
+      }
+    }
+    return [...deduped.values()];
+  }, [comparison?.benchmark_series]);
+  const primaryBenchmarkSeries =
+    benchmarkSeries.find(
+      (series) =>
+        series.ticker === primaryBenchmarkTicker &&
+        Math.abs(series.initial_cash - selectedBookInitialCash) < 0.01,
+    ) ??
+    benchmarkSeries.find((series) => series.ticker === primaryBenchmarkTicker) ??
+    benchmarkSeries[0] ??
+    null;
+  const benchmarkValue = primaryBenchmarkSeries ? currentPoint?.benchmark_values[primaryBenchmarkSeries.key] ?? null : null;
   const zoomOption = ZOOM_OPTIONS.find((option) => option.id === zoom) ?? ZOOM_OPTIONS[0];
   const timestamps = useMemo(() => points.map((point) => toTimestamp(point.date)), [points]);
+  const availableOverlayOptions = DEFAULT_BENCHMARK_OPTIONS.filter((ticker) => !overlayTickers.includes(ticker));
 
   function clearCommitTimer() {
     if (commitTimerRef.current !== null) {
@@ -199,7 +225,7 @@ export default function WorkspaceComparisonChart({
 
   const visibleWindow = useMemo(() => {
     if (!points.length) {
-      return { data: [] as RenderPoint[], startIndex: 0, endIndex: 0 };
+      return { data: [] as RenderPoint[], endIndex: 0, startIndex: 0 };
     }
 
     let startIndex = 0;
@@ -215,9 +241,7 @@ export default function WorkspaceComparisonChart({
 
     const rawData = points.slice(startIndex, endIndex + 1).map((point, offset) => ({
       ...point.book_values,
-      ...Object.fromEntries(
-        Object.entries(point.benchmark_values).map(([ticker, value]) => [benchmarkDataKey(ticker), value]),
-      ),
+      ...point.benchmark_values,
       date: point.date,
       pointIndex: startIndex + offset,
     }));
@@ -231,6 +255,15 @@ export default function WorkspaceComparisonChart({
 
   const chartData = visibleWindow.data;
 
+  function submitOverlayTicker() {
+    const normalized = customTicker.trim().toUpperCase();
+    if (!normalized) {
+      return;
+    }
+    onAddOverlayTicker(normalized);
+    setCustomTicker("");
+  }
+
   return (
     <Card className="surface-panel border-border/80">
       <CardHeader className="gap-5 border-b border-border/60 pb-5">
@@ -238,10 +271,88 @@ export default function WorkspaceComparisonChart({
           <div className="space-y-2">
             <div className="flex flex-wrap items-center gap-2">
               <Badge>Run Simulation</Badge>
-              <Badge variant="outline">{books.length} books</Badge>
-              <Badge variant="outline">{benchmarks.length} benchmarks</Badge>
+              <Badge variant="outline">{books.length} runnable books</Badge>
+              <Badge variant="outline">{overlayTickers.length} overlays</Badge>
             </div>
-            <CardTitle>Shared replay</CardTitle>
+            <div className="space-y-1">
+              <CardTitle>Shared replay</CardTitle>
+              <CardDescription className="max-w-3xl leading-6">
+                Books run together. Benchmark overlays are temporary chart lines and repeat per ready collection bankroll.
+              </CardDescription>
+            </div>
+          </div>
+        </div>
+
+        <div className="surface-panel-muted rounded-[18px] border border-border/70 px-4 py-4">
+          <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+            <div className="space-y-2">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                Overlays
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                {overlayTickers.map((ticker) => (
+                  <div
+                    className={cn(
+                      "inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.12em]",
+                      ticker === primaryBenchmarkTicker
+                        ? "border-primary/20 bg-primary/10 text-primary"
+                        : "border-border/70 bg-background/75 text-foreground",
+                    )}
+                    key={ticker}
+                  >
+                    <button onClick={() => onSetPrimaryOverlay(ticker)} type="button">
+                      {ticker}
+                    </button>
+                    {ticker === primaryBenchmarkTicker ? <Star className="h-3.5 w-3.5 fill-current" /> : null}
+                    {overlayTickers.length > 1 ? (
+                      <button
+                        aria-label={`Remove ${ticker}`}
+                        className="text-muted-foreground transition-colors hover:text-foreground"
+                        onClick={() => onRemoveOverlayTicker(ticker)}
+                        type="button"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              {availableOverlayOptions.slice(0, 5).map((ticker) => (
+                <button
+                  className="rounded-full border border-border/70 bg-card/65 px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground transition-colors hover:text-foreground"
+                  key={ticker}
+                  onClick={() => onAddOverlayTicker(ticker)}
+                  type="button"
+                >
+                  {ticker}
+                </button>
+              ))}
+              <div className="inline-flex items-center gap-2 rounded-full border border-border/70 bg-background/75 px-2 py-1.5">
+                <Input
+                  className="h-auto w-24 border-0 bg-transparent px-1 py-0 text-xs font-semibold uppercase tracking-[0.12em] shadow-none focus-visible:ring-0"
+                  onChange={(event) => setCustomTicker(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      submitOverlayTicker();
+                    }
+                  }}
+                  placeholder="Ticker"
+                  value={customTicker}
+                />
+                <button
+                  aria-label="Add overlay ticker"
+                  className="rounded-full bg-primary/10 p-1 text-primary transition-colors hover:bg-primary/15"
+                  onClick={submitOverlayTicker}
+                  type="button"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -260,7 +371,7 @@ export default function WorkspaceComparisonChart({
           </div>
           <div className="surface-panel-muted rounded-[18px] border border-border/70 px-4 py-4">
             <span className="block text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-              {primaryBenchmark?.ticker ?? "Benchmark"}
+              {primaryBenchmarkSeries?.label ?? "Primary Overlay"}
             </span>
             <strong className="mt-2 block font-mono text-lg">{formatCurrency(benchmarkValue)}</strong>
           </div>
@@ -269,7 +380,7 @@ export default function WorkspaceComparisonChart({
               Selected Return
             </span>
             <strong className="mt-2 block font-mono text-lg">
-              {formatPercent(bookReturn(selectedBookValue ?? undefined, initialCash))}
+              {formatPercent(bookReturn(selectedBookValue ?? undefined, selectedBookInitialCash))}
             </strong>
           </div>
         </div>
@@ -323,27 +434,27 @@ export default function WorkspaceComparisonChart({
                       dot={false}
                       isAnimationActive={false}
                       key={book.id}
-                      name={book.name}
+                      name={book.collection_name ? `${book.collection_name} · ${book.name}` : book.name}
                       stroke={bookAccent(book.id).color}
                       strokeLinecap="round"
-                      strokeOpacity={book.id === selectedBookId ? 1 : 0.65}
+                      strokeOpacity={book.id === selectedBookId ? 1 : 0.68}
                       strokeWidth={book.id === selectedBookId ? 3 : 2}
                       type={zoomOption.curve}
                     />
                   ))}
-                  {benchmarks.map((benchmark) => (
+                  {benchmarkSeries.map((series) => (
                     <Line
                       connectNulls
-                      dataKey={benchmarkDataKey(benchmark.ticker)}
+                      dataKey={series.key}
                       dot={false}
                       isAnimationActive={false}
-                      key={benchmark.ticker}
-                      name={benchmark.ticker}
-                      stroke={benchmarkAccent(benchmark.ticker)}
+                      key={series.key}
+                      name={series.label}
+                      stroke={benchmarkAccent(series.ticker)}
                       strokeDasharray="8 6"
                       strokeLinecap="round"
-                      strokeOpacity={benchmark.is_primary ? 0.95 : 0.65}
-                      strokeWidth={benchmark.is_primary ? 2.5 : 2}
+                      strokeOpacity={series.ticker === primaryBenchmarkTicker ? 0.92 : 0.55}
+                      strokeWidth={series.ticker === primaryBenchmarkTicker ? 2.5 : 1.8}
                       type={zoomOption.curve}
                     />
                   ))}
@@ -358,23 +469,11 @@ export default function WorkspaceComparisonChart({
                     Timeline
                   </div>
                   <p className="mt-1 text-sm text-muted-foreground">
-                    Hit Play when you are ready, or scrub to inspect one shared date.
+                    Play the shared replay or scrub to inspect one date across every ready collection.
                   </p>
                 </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  {benchmarks.map((benchmark) => (
-                    <span
-                      className="inline-flex items-center gap-2 rounded-full border border-border/70 bg-background/75 px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.12em] text-foreground"
-                      key={benchmark.ticker}
-                    >
-                      <span
-                        aria-hidden="true"
-                        className="h-2.5 w-2.5 rounded-full"
-                        style={{ backgroundColor: benchmarkAccent(benchmark.ticker) }}
-                      />
-                      {benchmark.ticker}
-                    </span>
-                  ))}
+                <div className="text-right text-xs text-muted-foreground">
+                  {primaryBenchmarkTicker ? `Primary overlay: ${primaryBenchmarkTicker}` : "No primary overlay"}
                 </div>
               </div>
 
@@ -468,7 +567,7 @@ export default function WorkspaceComparisonChart({
             </div>
 
             <div className="grid gap-3 lg:grid-cols-2 xl:grid-cols-3">
-              {books.map((book, index) => {
+              {books.map((book) => {
                 const value = currentPoint?.book_values[book.id];
                 const active = book.id === selectedBookId;
                 const accent = bookAccent(book.id);
@@ -489,7 +588,10 @@ export default function WorkspaceComparisonChart({
                   >
                     <div className="flex items-start justify-between gap-4">
                       <div>
-                        <strong className="block text-base">{book.name}</strong>
+                        <span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                          {book.collection_name ?? "Collection"}
+                        </span>
+                        <strong className="mt-2 block text-base">{book.name}</strong>
                         <span className="mt-1 block text-sm text-muted-foreground">{book.description}</span>
                       </div>
                       <span
@@ -503,10 +605,10 @@ export default function WorkspaceComparisonChart({
                       <span
                         className={cn(
                           "font-mono text-sm font-semibold",
-                          (bookReturn(value, initialCash) ?? 0) >= 0 ? "text-emerald-400" : "text-destructive",
+                          (bookReturn(value, book.initial_cash) ?? 0) >= 0 ? "text-emerald-400" : "text-destructive",
                         )}
                       >
-                        {formatPercent(bookReturn(value, initialCash))}
+                        {formatPercent(bookReturn(value, book.initial_cash))}
                       </span>
                     </div>
                   </button>
@@ -517,9 +619,9 @@ export default function WorkspaceComparisonChart({
         ) : (
           <div className="surface-panel-muted grid h-[420px] place-items-center rounded-[18px] border border-dashed border-border/70 px-6 text-center">
             <div className="max-w-lg">
-              <p className="text-lg font-semibold">This workspace has no books yet.</p>
+              <p className="text-lg font-semibold">No runnable collections yet.</p>
               <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                Add a preset spread or custom basket to start drawing comparison lines from the shared start date.
+                Build at least one fully ready collection to start the shared replay.
               </p>
             </div>
           </div>

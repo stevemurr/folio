@@ -49,18 +49,48 @@ class MarketDataService:
         *,
         force: bool = False,
     ) -> None:
+        self._ensure_price_history(tickers, start_date, end_date, force=force, allow_missing=False)
+
+    def ensure_price_history_partial(
+        self,
+        tickers: list[str],
+        start_date: date,
+        end_date: date,
+        *,
+        force: bool = False,
+    ) -> list[str]:
+        return self._ensure_price_history(tickers, start_date, end_date, force=force, allow_missing=True)
+
+    def _ensure_price_history(
+        self,
+        tickers: list[str],
+        start_date: date,
+        end_date: date,
+        *,
+        force: bool = False,
+        allow_missing: bool,
+    ) -> list[str]:
         normalized = sorted({self._normalize_ticker(ticker) for ticker in tickers if ticker})
         if not normalized:
-            return
+            return []
+        expected_start, expected_end = self._expected_market_window(start_date, end_date)
+        if expected_start is None or expected_end is None:
+            return []
 
         real_estate_tickers = [ticker for ticker in normalized if ticker.startswith("RE:")]
         market_tickers = [ticker for ticker in normalized if not ticker.startswith("RE:")]
+        missing: list[str] = []
 
         for ticker in real_estate_tickers:
-            self.real_estate.ensure_price_history(ticker, start_date, end_date, force=force)
+            try:
+                self.real_estate.ensure_price_history(ticker, start_date, end_date, force=force)
+            except ApiErrorException:
+                if not allow_missing:
+                    raise
+                missing.append(ticker)
 
         if not market_tickers:
-            return
+            return missing
 
         stale_before = datetime.now(UTC).replace(tzinfo=None) - timedelta(
             days=self.settings.market.cache_ttl_days
@@ -74,7 +104,7 @@ class MarketDataService:
                     func.max(PriceCache.fetched_at),
                 ).where(PriceCache.ticker == ticker)
             ).one()
-            if force or cache_min is None or cache_min > start_date or cache_max < end_date:
+            if force or cache_min is None or cache_min > expected_start or cache_max < expected_end:
                 needs_fetch.append(ticker)
                 continue
             normalized_fetched_at = fetched_at
@@ -84,11 +114,16 @@ class MarketDataService:
                 needs_fetch.append(ticker)
 
         if needs_fetch:
-            self._fetch_history_batch(
+            fetch_args = (
                 needs_fetch,
                 start_date - timedelta(days=FETCH_BUFFER_DAYS),
                 end_date,
             )
+            if allow_missing:
+                missing.extend(self._fetch_history_batch(*fetch_args, allow_missing=True))
+            else:
+                self._fetch_history_batch(*fetch_args)
+        return missing
 
     def search_tickers(self, query: str) -> list[MarketSearchResult]:
         normalized_query = query.strip()
@@ -170,6 +205,31 @@ class MarketDataService:
 
         end_date = max(target_date, date.today())
         self.ensure_price_history(normalized, target_date, end_date)
+        resolved = self._resolved_prices_from_cache(normalized, target_date)
+        missing = [ticker for ticker in normalized if resolved.get(ticker) is None]
+        if missing:
+            missing_label = ", ".join(missing)
+            raise ApiErrorException(
+                404,
+                "invalid_ticker",
+                f"No market data found on or after {target_date.isoformat()} for {missing_label}.",
+            )
+        return {ticker: price for ticker, price in resolved.items() if price is not None}
+
+    def resolve_first_prices_on_or_after(self, tickers: list[str], target_date: date) -> dict[str, ResolvedPrice | None]:
+        normalized = sorted({self._normalize_ticker(ticker) for ticker in tickers if ticker})
+        if not normalized:
+            return {}
+
+        end_date = max(target_date, date.today())
+        self.ensure_price_history_partial(normalized, target_date, end_date)
+        return self._resolved_prices_from_cache(normalized, target_date)
+
+    def _resolved_prices_from_cache(
+        self,
+        normalized: list[str],
+        target_date: date,
+    ) -> dict[str, ResolvedPrice | None]:
         rows = self.session.execute(
             select(PriceCache)
             .where(PriceCache.ticker.in_(normalized), PriceCache.date >= target_date)
@@ -182,16 +242,7 @@ class MarketDataService:
                 continue
             resolved[row.ticker] = ResolvedPrice(ticker=row.ticker, date=row.date, close=row.close)
 
-        missing = [ticker for ticker in normalized if ticker not in resolved]
-        if missing:
-            missing_label = ", ".join(missing)
-            raise ApiErrorException(
-                404,
-                "invalid_ticker",
-                f"No market data found on or after {target_date.isoformat()} for {missing_label}.",
-            )
-
-        return resolved
+        return {ticker: resolved.get(ticker) for ticker in normalized}
 
     def get_latest_price(self, ticker: str) -> MarketPriceResponse:
         normalized = self._normalize_ticker(ticker)
@@ -262,7 +313,14 @@ class MarketDataService:
         pivot.index = pd.to_datetime(pivot.index)
         return pivot
 
-    def _fetch_history_batch(self, tickers: list[str], start_date: date, end_date: date) -> None:
+    def _fetch_history_batch(
+        self,
+        tickers: list[str],
+        start_date: date,
+        end_date: date,
+        *,
+        allow_missing: bool = False,
+    ) -> list[str]:
         data = yf.download(
             tickers=tickers if len(tickers) > 1 else tickers[0],
             start=start_date.isoformat(),
@@ -282,41 +340,92 @@ class MarketDataService:
                 missing.append(ticker)
                 continue
             for raw_date, row in frame.iterrows():
-                close_value = row.get("Adj Close") if pd.notna(row.get("Adj Close")) else row.get("Close")
+                adjusted_close = self._row_value(row, "Adj Close")
+                close_value = adjusted_close if pd.notna(adjusted_close) else self._row_value(row, "Close")
                 if pd.isna(close_value):
                     continue
                 cache_row = PriceCache(
                     ticker=ticker,
                     date=raw_date.date(),
                     source="yfinance",
-                    open_price=self._decimal_or_none(row.get("Open")),
-                    high_price=self._decimal_or_none(row.get("High")),
-                    low_price=self._decimal_or_none(row.get("Low")),
+                    open_price=self._decimal_or_none(self._row_value(row, "Open")),
+                    high_price=self._decimal_or_none(self._row_value(row, "High")),
+                    low_price=self._decimal_or_none(self._row_value(row, "Low")),
                     close=Decimal(str(round(float(close_value), 6))),
-                    volume=int(row.get("Volume")) if pd.notna(row.get("Volume")) else None,
+                    volume=self._int_or_none(self._row_value(row, "Volume")),
                     fetched_at=fetched_at,
                 )
                 self.session.merge(cache_row)
 
         if missing:
+            if allow_missing:
+                self.session.commit()
+                return missing
             self.session.rollback()
             ticker_list = ", ".join(missing)
             raise ApiErrorException(404, "invalid_ticker", f"No market data found for {ticker_list}.")
 
         self.session.commit()
+        return []
 
     def _extract_ticker_frame(self, data: pd.DataFrame, ticker: str, *, multi: bool) -> pd.DataFrame:
         if data.empty:
             return pd.DataFrame()
         if multi:
-            if ticker not in data.columns.get_level_values(0):
-                return pd.DataFrame()
-            frame = data[ticker].copy()
+            if not isinstance(data.columns, pd.MultiIndex):
+                frame = data.copy()
+            else:
+                frame = self._select_ticker_columns(data, ticker)
+                if frame.empty:
+                    return frame
         else:
             frame = data.copy()
+        normalized = self._normalize_price_frame(frame)
+        return normalized.dropna(how="all")
+
+    def _select_ticker_columns(self, data: pd.DataFrame, ticker: str) -> pd.DataFrame:
+        if not isinstance(data.columns, pd.MultiIndex):
+            return data.copy()
+        for level in range(data.columns.nlevels):
+            values = data.columns.get_level_values(level)
+            if ticker not in values:
+                continue
+            return data.xs(ticker, axis=1, level=level, drop_level=True).copy()
+        return pd.DataFrame()
+
+    def _normalize_price_frame(self, frame: pd.DataFrame) -> pd.DataFrame:
         if isinstance(frame.columns, pd.MultiIndex):
-            frame.columns = frame.columns.get_level_values(-1)
-        return frame.dropna(how="all")
+            price_fields = {"Open", "High", "Low", "Close", "Adj Close", "Volume"}
+            target_level: int | None = None
+            for level in range(frame.columns.nlevels):
+                values = {str(value) for value in frame.columns.get_level_values(level)}
+                if price_fields.intersection(values):
+                    target_level = level
+                    break
+            frame = frame.copy()
+            frame.columns = frame.columns.get_level_values(target_level if target_level is not None else -1)
+        return self._collapse_duplicate_columns(frame)
+
+    def _collapse_duplicate_columns(self, frame: pd.DataFrame) -> pd.DataFrame:
+        if not frame.columns.has_duplicates:
+            return frame
+        collapsed: dict[str, pd.Series] = {}
+        for column in dict.fromkeys(str(label) for label in frame.columns):
+            duplicate_columns = frame.loc[:, frame.columns == column]
+            if isinstance(duplicate_columns, pd.Series):
+                collapsed[column] = duplicate_columns
+                continue
+            collapsed[column] = duplicate_columns.bfill(axis=1).iloc[:, 0]
+        return pd.DataFrame(collapsed, index=frame.index)
+
+    def _row_value(self, row: pd.Series, column: str) -> Any:
+        value = row.get(column)
+        if isinstance(value, pd.Series):
+            non_null = value.dropna()
+            if non_null.empty:
+                return None
+            return non_null.iloc[0]
+        return value
 
     def _normalize_ticker(self, ticker: str) -> str:
         normalized = ticker.strip().upper()
@@ -327,7 +436,22 @@ class MarketDataService:
         return normalized
 
     @staticmethod
+    def _expected_market_window(start_date: date, end_date: date) -> tuple[date | None, date | None]:
+        if start_date > end_date:
+            return None, None
+        business_days = pd.bdate_range(start=start_date, end=end_date)
+        if business_days.empty:
+            return None, None
+        return business_days[0].date(), business_days[-1].date()
+
+    @staticmethod
     def _decimal_or_none(value: Any) -> Decimal | None:
         if value is None or pd.isna(value):
             return None
         return Decimal(str(round(float(value), 6)))
+
+    @staticmethod
+    def _int_or_none(value: Any) -> int | None:
+        if value is None or pd.isna(value):
+            return None
+        return int(value)

@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { LoaderCircle, Search, Trash2, X } from "lucide-react";
 
-import { BookConfig, api, BookCreateRequest, MarketSearchResult } from "../api/client";
+import { BookConfig, api, BookCreateRequest, MarketSearchResult, WorkspaceAvailabilityResponse } from "../api/client";
 import { cn } from "../lib/utils";
 import { GUIDED_RUN_PRESETS, presetById, weightsForPreset } from "../lib/guidedRun";
 import { Badge } from "./ui/badge";
@@ -20,6 +20,7 @@ type CustomAllocation = {
 };
 
 type Props = {
+  collectionName?: string | null;
   config: BookConfig | null;
   error: string | null;
   loadingConfig?: boolean;
@@ -28,6 +29,7 @@ type Props = {
   onSubmit: (payload: BookCreateRequest) => void;
   open: boolean;
   pending: boolean;
+  workspaceId: string | null;
 };
 
 function initialPresetWeights(presetId: string) {
@@ -73,7 +75,36 @@ function presetWeightsFromConfig(config: BookConfig, presetId: string) {
   return weights;
 }
 
+function formatLongDate(value: string | null | undefined) {
+  if (!value) {
+    return "n/a";
+  }
+  return new Intl.DateTimeFormat("en-US", {
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+  }).format(new Date(`${value}T00:00:00`));
+}
+
+function availabilityMessage(data: WorkspaceAvailabilityResponse | undefined): string | null {
+  if (!data) {
+    return null;
+  }
+  if (data.issues.length) {
+    return data.issues[0].message;
+  }
+  const blocked = data.tickers.find((item) => !item.available);
+  if (!blocked) {
+    return null;
+  }
+  if (blocked.first_tradable_date) {
+    return `${blocked.ticker} first becomes tradable on ${blocked.first_tradable_date}.`;
+  }
+  return `${blocked.ticker} has no market data for the shared opening session.`;
+}
+
 export default function CreateBookModal({
+  collectionName,
   config,
   error,
   loadingConfig = false,
@@ -82,6 +113,7 @@ export default function CreateBookModal({
   onSubmit,
   open,
   pending,
+  workspaceId,
 }: Props) {
   const [strategyMode, setStrategyMode] = useState<"preset" | "custom">("preset");
   const [presetId, setPresetId] = useState(GUIDED_RUN_PRESETS[0].id);
@@ -161,6 +193,29 @@ export default function CreateBookModal({
   );
   const presetCashWeight = 100 - presetAllocationRows.reduce((sum, item) => sum + item.weight, 0);
   const customCashWeight = 100 - customAllocations.reduce((sum, item) => sum + parseWeight(item.weight), 0);
+  const activeTickers = useMemo(() => {
+    const tickers =
+      strategyMode === "preset"
+        ? presetAllocationRows.filter((allocation) => allocation.weight > 0).map((allocation) => allocation.ticker)
+        : customAllocations
+            .filter((allocation) => parseWeight(allocation.weight) > 0)
+            .map((allocation) => allocation.ticker);
+    return [...new Set(tickers)].sort();
+  }, [customAllocations, presetAllocationRows, strategyMode]);
+  const availabilityQuery = useQuery({
+    queryFn: ({ signal }) => api.getWorkspaceAvailability(workspaceId!, activeTickers, signal),
+    queryKey: ["workspace-availability", workspaceId, activeTickers],
+    enabled: open && Boolean(workspaceId) && activeTickers.length > 0,
+    retry: false,
+    staleTime: 60 * 1000,
+  });
+  const availabilityByTicker = useMemo(
+    () => Object.fromEntries((availabilityQuery.data?.tickers ?? []).map((item) => [item.ticker, item])),
+    [availabilityQuery.data?.tickers],
+  );
+  const availabilityError = availabilityMessage(availabilityQuery.data);
+  const availabilityBlocked = Boolean(availabilityError);
+  const openingSession = availabilityQuery.data?.opening_session ?? null;
 
   if (!open) {
     return null;
@@ -220,6 +275,10 @@ export default function CreateBookModal({
       setLocalError("Book name is required.");
       return;
     }
+    if (availabilityBlocked) {
+      setLocalError(availabilityError ?? "This book cannot launch on the workspace opening session.");
+      return;
+    }
 
     setLocalError(null);
     onSubmit({
@@ -241,10 +300,14 @@ export default function CreateBookModal({
               </div>
               <div className="space-y-2">
                 <CardTitle className="text-2xl leading-tight sm:text-3xl">
-                  {mode === "edit" ? "Edit this strategy." : "Configure a book for this workspace."}
+                  {mode === "edit"
+                    ? "Edit this strategy."
+                    : collectionName
+                      ? `Configure a book for ${collectionName}.`
+                      : "Configure a book for this collection."}
                 </CardTitle>
                 <CardDescription className="max-w-2xl text-sm leading-6 text-muted-foreground">
-                  Choose a preset spread or build a custom basket.
+                  Choose a preset spread or build a custom basket for this bankroll cohort.
                 </CardDescription>
               </div>
             </div>
@@ -325,6 +388,22 @@ export default function CreateBookModal({
                           <div>
                             <strong className="block text-base">{allocation.ticker}</strong>
                             <span className="mt-1 block text-xs uppercase tracking-[0.18em] text-muted-foreground">ETF</span>
+                            {allocation.weight > 0 && availabilityByTicker[allocation.ticker] ? (
+                              <span
+                                className={cn(
+                                  "mt-2 inline-flex rounded-full border px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.16em]",
+                                  availabilityByTicker[allocation.ticker].available
+                                    ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-300"
+                                    : "border-destructive/25 bg-destructive/10 text-destructive",
+                                )}
+                              >
+                                {availabilityByTicker[allocation.ticker].available
+                                  ? "Ready At Open"
+                                  : availabilityByTicker[allocation.ticker].first_tradable_date
+                                    ? `Starts ${availabilityByTicker[allocation.ticker].first_tradable_date}`
+                                    : "Unavailable"}
+                              </span>
+                            ) : null}
                           </div>
                           <label className="grid gap-2 text-sm font-semibold text-foreground">
                             <span className="sr-only">{allocation.ticker} weight</span>
@@ -387,6 +466,22 @@ export default function CreateBookModal({
                               <div>
                                 <strong className="block text-base">{allocation.ticker}</strong>
                                 <span className="mt-1 block text-sm text-muted-foreground">{allocation.name}</span>
+                                {parseWeight(allocation.weight) > 0 && availabilityByTicker[allocation.ticker] ? (
+                                  <span
+                                    className={cn(
+                                      "mt-2 inline-flex rounded-full border px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.16em]",
+                                      availabilityByTicker[allocation.ticker].available
+                                        ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-300"
+                                        : "border-destructive/25 bg-destructive/10 text-destructive",
+                                    )}
+                                  >
+                                    {availabilityByTicker[allocation.ticker].available
+                                      ? "Ready At Open"
+                                      : availabilityByTicker[allocation.ticker].first_tradable_date
+                                        ? `Starts ${availabilityByTicker[allocation.ticker].first_tradable_date}`
+                                        : "Unavailable"}
+                                  </span>
+                                ) : null}
                               </div>
                               <label className="grid gap-2 text-sm font-semibold text-foreground">
                                 <span className="sr-only">{allocation.ticker} weight</span>
@@ -453,15 +548,29 @@ export default function CreateBookModal({
                       </strong>
                     </div>
                     <div className="surface-panel-soft rounded-[16px] border border-dashed border-border/70 px-4 py-4 text-sm leading-6 text-muted-foreground">
-                      Every book launches from the shared workspace bankroll.
+                      {availabilityQuery.isLoading
+                        ? "Checking the shared opening session..."
+                        : openingSession
+                          ? `Every book launches from the shared workspace bankroll on ${formatLongDate(openingSession)}.`
+                          : "Every book launches from the shared workspace bankroll."}
                     </div>
+                    {availabilityBlocked ? (
+                      <p className="rounded-[18px] border border-destructive/20 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+                        {availabilityError}
+                      </p>
+                    ) : null}
                     {localError || error ? (
                       <p className="rounded-[18px] border border-destructive/20 bg-destructive/10 px-4 py-3 text-sm text-destructive">
                         {localError || error}
                       </p>
                     ) : null}
                     <div className="flex flex-col gap-3">
-                      <Button className="justify-between" disabled={pending || loadingConfig} size="lg" type="submit">
+                      <Button
+                        className="justify-between"
+                        disabled={pending || loadingConfig || availabilityQuery.isLoading || availabilityBlocked}
+                        size="lg"
+                        type="submit"
+                      >
                         <span>{pending ? "Saving..." : mode === "edit" ? "Save Book" : "Create Book"}</span>
                         <span className="font-mono text-xs">{mode === "edit" ? "BOOK*" : "BOOK+"}</span>
                       </Button>

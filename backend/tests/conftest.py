@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from backend.config import get_settings
 from backend.database import get_engine, get_session_factory, init_database
 from backend.main import app
-from backend.models.db import Base, Portfolio, PriceCache, Workspace
+from backend.models.db import Base, BookCollection, Portfolio, PriceCache, Workspace
 
 
 @pytest.fixture()
@@ -97,9 +97,41 @@ def create_workspace(session, *, name: str = "January 01, 2020", start_date: dat
     return workspace
 
 
-def create_portfolio(session, *, name: str = "Core", initial_cash: float = 10_000, workspace: Workspace | None = None) -> Portfolio:
+def create_collection(
+    session,
+    *,
+    name: str = "Collection 1",
+    initial_cash: float = 10_000,
+    workspace: Workspace | None = None,
+) -> BookCollection:
     active_workspace = workspace or create_workspace(session)
-    portfolio = Portfolio(workspace_id=active_workspace.id, name=name, description="", initial_cash=initial_cash)
+    collection = BookCollection(
+        workspace_id=active_workspace.id,
+        name=name,
+        initial_cash=initial_cash,
+    )
+    session.add(collection)
+    session.commit()
+    session.refresh(collection)
+    return collection
+
+
+def create_portfolio(
+    session,
+    *,
+    name: str = "Core",
+    initial_cash: float = 10_000,
+    workspace: Workspace | None = None,
+    collection: BookCollection | None = None,
+) -> Portfolio:
+    active_collection = collection or create_collection(session, initial_cash=initial_cash, workspace=workspace)
+    portfolio = Portfolio(
+        workspace_id=active_collection.workspace_id,
+        collection_id=active_collection.id,
+        name=name,
+        description="",
+        initial_cash=initial_cash,
+    )
     session.add(portfolio)
     session.commit()
     session.refresh(portfolio)

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from decimal import Decimal
 from pathlib import Path
 
+from backend.models.db import BookAllocation, BookCollection, Portfolio, Position, Workspace
 from backend.services.agent_service import AgentService
+from backend.services.market_data import ResolvedPrice
 
 from .conftest import add_price_history, recent_business_series
 
@@ -39,21 +42,37 @@ def write_zillow_fixture(path: Path, rows: list[dict[str, object]]) -> None:
 def create_workspace(client, start_date: date) -> str:
     created = client.post("/api/v1/workspaces", json={"start_date": start_date.isoformat()})
     assert created.status_code == 201
-    return created.json()["workspace"]["id"]
+    return created.json()["id"]
 
 
-def create_book(client, workspace_id: str, payload: dict[str, object]) -> str:
-    created = client.post(f"/api/v1/workspaces/{workspace_id}/books", json=payload)
+def default_collection_id(client, workspace_id: str) -> str:
+    view = client.get(f"/api/v1/workspaces/{workspace_id}/view")
+    assert view.status_code == 200
+    return view.json()["collections"][0]["id"]
+
+
+def create_collection(client, workspace_id: str, *, initial_cash: int = 10_000, name: str | None = None) -> str:
+    payload = {"initial_cash": initial_cash}
+    if name is not None:
+        payload["name"] = name
+    created = client.post(f"/api/v1/workspaces/{workspace_id}/collections", json=payload)
     assert created.status_code == 201
-    return created.json()["book"]["id"]
+    return created.json()["id"]
+
+
+def create_book(client, collection_id: str, payload: dict[str, object]) -> str:
+    created = client.post(f"/api/v1/collections/{collection_id}/books", json=payload)
+    assert created.status_code == 201
+    return created.json()["id"]
 
 
 def create_positioned_book(client, db_session) -> tuple[str, str]:
     prices = seed_workspace_prices(db_session)
     workspace_id = create_workspace(client, first_monday(prices["VTI"]) - timedelta(days=2))
+    collection_id = default_collection_id(client, workspace_id)
     book_id = create_book(
         client,
-        workspace_id,
+        collection_id,
         {
             "name": "Core",
             "description": "Main",
@@ -68,18 +87,41 @@ def create_positioned_book(client, db_session) -> tuple[str, str]:
     return workspace_id, book_id
 
 
-def test_workspace_and_book_flow_supports_comparison_and_snapshot(client, db_session):
+def patch_1998_opening_session(monkeypatch):
+    lookup = {
+        "SPY": ResolvedPrice(ticker="SPY", date=date(1998, 2, 18), close=Decimal("100")),
+        "VTI": ResolvedPrice(ticker="VTI", date=date(1998, 2, 18), close=Decimal("100")),
+        "QQQ": ResolvedPrice(ticker="QQQ", date=date(1998, 2, 18), close=Decimal("100")),
+        "TLT": ResolvedPrice(ticker="TLT", date=date(1998, 2, 18), close=Decimal("100")),
+        "GLD": ResolvedPrice(ticker="GLD", date=date(2004, 11, 18), close=Decimal("100")),
+    }
+
+    def resolve_first_prices_on_or_after(self, tickers, target_date):  # noqa: ANN001
+        return {ticker.strip().upper(): lookup.get(ticker.strip().upper()) for ticker in tickers}
+
+    monkeypatch.setattr(
+        "backend.services.market_data.MarketDataService.resolve_first_prices_on_or_after",
+        resolve_first_prices_on_or_after,
+    )
+
+
+def test_workspace_flow_supports_collections_comparison_and_snapshot(client, db_session):
     prices = seed_workspace_prices(db_session)
     workspace_start = first_monday(prices["VTI"]) - timedelta(days=2)
+    opening_session = first_monday(prices["VTI"])
 
     workspace_id = create_workspace(client, workspace_start)
+    primary_collection_id = default_collection_id(client, workspace_id)
+    secondary_collection_id = create_collection(client, workspace_id, initial_cash=10_000, name="Collection 2")
 
     listing = client.get("/api/v1/workspaces")
     assert listing.status_code == 200
     assert listing.json()[0]["book_count"] == 0
+    assert listing.json()[0]["collection_count"] == 2
+    assert listing.json()[0]["run_state"]["status"] == "draft"
 
     core_book_create = client.post(
-        f"/api/v1/workspaces/{workspace_id}/books",
+        f"/api/v1/collections/{primary_collection_id}/books",
         json={
             "name": "Core",
             "description": "Preset spread",
@@ -91,21 +133,19 @@ def test_workspace_and_book_flow_supports_comparison_and_snapshot(client, db_ses
                 {"ticker": "GLD", "asset_type": "etf", "weight": 10},
                 {"ticker": "TLT", "asset_type": "etf", "weight": 10},
             ],
-            "snapshot_as_of": workspace_start.isoformat(),
         },
     )
     assert core_book_create.status_code == 201
     core_book_payload = core_book_create.json()
-    core_book_id = core_book_payload["book"]["id"]
-    assert core_book_payload["workspace_view"]["workspace"]["id"] == workspace_id
-    assert core_book_payload["snapshot"]["id"] == core_book_id
-    assert core_book_payload["snapshot"]["as_of"] == workspace_start.isoformat()
-    assert core_book_payload["snapshot"]["allocation"][0]["ticker"] == "CASH"
-    assert core_book_payload["book"]["strategy_kind"] == "preset"
-    assert core_book_payload["book"]["preset_id"] == "core"
+    core_book_id = core_book_payload["id"]
+    assert core_book_payload["collection_id"] == primary_collection_id
+    assert core_book_payload["strategy_kind"] == "preset"
+    assert core_book_payload["preset_id"] == "core"
+    assert core_book_payload["run_state"]["status"] == "ready"
+
     challenger_book_id = create_book(
         client,
-        workspace_id,
+        secondary_collection_id,
         {
             "name": "Tech Tilt",
             "description": "Custom basket",
@@ -120,65 +160,72 @@ def test_workspace_and_book_flow_supports_comparison_and_snapshot(client, db_ses
     workspace = client.get(f"/api/v1/workspaces/{workspace_id}")
     assert workspace.status_code == 200
     assert workspace.json()["book_count"] == 2
-    assert workspace.json()["initial_cash"] == 10000
-    assert workspace.json()["benchmarks"] == [{"ticker": "SPY", "is_primary": True}]
+    assert workspace.json()["collection_count"] == 2
+    assert workspace.json()["run_state"]["status"] == "ready"
+    assert workspace.json()["run_state"]["opening_session"] == opening_session.isoformat()
 
     view = client.get(f"/api/v1/workspaces/{workspace_id}/view")
     assert view.status_code == 200
     view_payload = view.json()
     assert view_payload["workspace"]["id"] == workspace_id
-    assert {item["name"] for item in view_payload["books"]} == {"Core", "Tech Tilt"}
-    assert len(view_payload["comparison"]["points"]) >= 50
+    assert view_payload["workspace"]["run_state"]["status"] == "ready"
+    assert len(view_payload["collections"]) == 2
+    assert {collection["name"] for collection in view_payload["collections"]} == {"Collection 1", "Collection 2"}
+    assert {
+        book["name"]
+        for collection in view_payload["collections"]
+        for book in collection["books"]
+    } == {"Core", "Tech Tilt"}
 
-    books = client.get(f"/api/v1/workspaces/{workspace_id}/books")
-    assert books.status_code == 200
-    assert {item["name"] for item in books.json()} == {"Core", "Tech Tilt"}
-
-    comparison = client.get(f"/api/v1/workspaces/{workspace_id}/comparison")
+    comparison = client.post(
+        f"/api/v1/workspaces/{workspace_id}/comparison",
+        json={"benchmark_tickers": ["SPY", "QQQ"], "primary_benchmark_ticker": "QQQ"},
+    )
     assert comparison.status_code == 200
     comparison_payload = comparison.json()
     assert comparison_payload["workspace_id"] == workspace_id
-    assert comparison_payload["primary_benchmark_ticker"] == "SPY"
-    assert comparison_payload["benchmark_tickers"] == ["SPY"]
+    assert comparison_payload["primary_benchmark_ticker"] == "QQQ"
+    assert set(comparison_payload["benchmark_tickers"]) == {"SPY", "QQQ"}
+    assert len(comparison_payload["benchmark_series"]) == 2
     assert len(comparison_payload["points"]) >= 50
     first_point = comparison_payload["points"][0]
     assert set(first_point["book_values"]) == {core_book_id, challenger_book_id}
-    assert first_point["benchmark_values"]["SPY"] is not None
+    assert any(series["label"] == "QQQ" for series in comparison_payload["benchmark_series"])
 
-    starting_snapshot = client.get(f"/api/v1/books/{core_book_id}/snapshot", params={"as_of": workspace_start.isoformat()})
+    starting_snapshot = client.get(
+        f"/api/v1/books/{core_book_id}/snapshot",
+        params={"as_of": workspace_start.isoformat(), "benchmark_ticker": "QQQ"},
+    )
     assert starting_snapshot.status_code == 200
     starting_payload = starting_snapshot.json()
+    assert starting_payload["collection_id"] == primary_collection_id
     assert starting_payload["as_of"] == workspace_start.isoformat()
     assert starting_payload["metrics"]["position_count"] == 0
     assert starting_payload["allocation"][0]["ticker"] == "CASH"
 
     midpoint = comparison_payload["points"][20]["date"]
-    snapshot = client.get(f"/api/v1/books/{core_book_id}/snapshot", params={"as_of": midpoint})
+    snapshot = client.get(
+        f"/api/v1/books/{core_book_id}/snapshot",
+        params={"as_of": midpoint, "benchmark_ticker": "QQQ"},
+    )
     assert snapshot.status_code == 200
     snapshot_payload = snapshot.json()
     assert snapshot_payload["id"] == core_book_id
     assert snapshot_payload["as_of"] == midpoint
     assert snapshot_payload["metrics"]["book_id"] == core_book_id
     assert snapshot_payload["metrics"]["position_count"] == 4
+    assert snapshot_payload["metrics"]["benchmark_ticker"] == "QQQ"
     assert {item["ticker"] for item in snapshot_payload["positions"]} == {"VTI", "QQQ", "GLD", "TLT"}
-    assert snapshot_payload["allocation"][0]["ticker"] in {"VTI", "QQQ", "GLD", "TLT", "CASH"}
-
-    deleted_book = client.delete(f"/api/v1/books/{challenger_book_id}")
-    assert deleted_book.status_code == 204
-    assert len(client.get(f"/api/v1/workspaces/{workspace_id}/books").json()) == 1
-
-    deleted_workspace = client.delete(f"/api/v1/workspaces/{workspace_id}")
-    assert deleted_workspace.status_code == 204
-    assert client.get("/api/v1/workspaces").json() == []
 
 
-def test_workspace_updates_and_book_edit_reseed_from_workspace_bankroll(client, db_session):
+def test_collection_update_reseeds_books_from_collection_bankroll(client, db_session):
     prices = seed_workspace_prices(db_session)
     workspace_start = first_monday(prices["VTI"]) - timedelta(days=2)
     workspace_id = create_workspace(client, workspace_start)
+    collection_id = default_collection_id(client, workspace_id)
     book_id = create_book(
         client,
-        workspace_id,
+        collection_id,
         {
             "name": "Core",
             "description": "Preset spread",
@@ -193,47 +240,33 @@ def test_workspace_updates_and_book_edit_reseed_from_workspace_bankroll(client, 
         },
     )
 
-    updated_workspace = client.patch(
-        f"/api/v1/workspaces/{workspace_id}",
-        json={
-            "initial_cash": 25000,
-            "benchmark_tickers": ["SPY", "QQQ"],
-            "primary_benchmark_ticker": "QQQ",
-        },
+    updated_collection = client.patch(
+        f"/api/v1/collections/{collection_id}",
+        json={"initial_cash": 25000, "name": "Large Cap Cohort"},
     )
-    assert updated_workspace.status_code == 200
-    workspace_payload = updated_workspace.json()
-    assert workspace_payload["workspace"]["initial_cash"] == 25000
-    assert workspace_payload["comparison"]["primary_benchmark_ticker"] == "QQQ"
-    assert workspace_payload["comparison"]["benchmark_tickers"] == ["SPY", "QQQ"]
+    assert updated_collection.status_code == 200
+    collection_payload = updated_collection.json()
+    assert collection_payload["name"] == "Large Cap Cohort"
+    assert collection_payload["initial_cash"] == 25000
 
-    config = client.get(f"/api/v1/books/{book_id}/config")
-    assert config.status_code == 200
-    assert config.json()["strategy_kind"] == "preset"
-    assert config.json()["preset_id"] == "core"
+    refreshed_view = client.get(f"/api/v1/workspaces/{workspace_id}/view")
+    assert refreshed_view.status_code == 200
+    refreshed_payload = refreshed_view.json()
+    collection_payload = next(item for item in refreshed_payload["collections"] if item["id"] == collection_id)
+    assert collection_payload["name"] == "Large Cap Cohort"
+    assert collection_payload["initial_cash"] == 25000
+    assert collection_payload["books"][0]["initial_cash"] == 25000
 
-    updated_book = client.patch(
-        f"/api/v1/books/{book_id}",
-        json={
-            "name": "Tech Tilt",
-            "description": "QQQ and AAPL",
-            "strategy_kind": "custom",
-            "allocations": [
-                {"ticker": "QQQ", "asset_type": "etf", "weight": 70},
-                {"ticker": "AAPL", "asset_type": "stock", "weight": 20},
-            ],
-        },
+    updated_snapshot = client.get(
+        f"/api/v1/books/{book_id}/snapshot",
+        params={"as_of": workspace_start.isoformat(), "benchmark_ticker": "QQQ"},
     )
-    assert updated_book.status_code == 200
-    book_payload = updated_book.json()
-    assert book_payload["book"]["name"] == "Tech Tilt"
-    assert book_payload["book"]["strategy_kind"] == "custom"
-    assert book_payload["book"]["cash_weight"] == 10
-    assert book_payload["snapshot"]["initial_cash"] == 25000
-    assert book_payload["snapshot"]["metrics"]["benchmark_ticker"] == "QQQ"
+    assert updated_snapshot.status_code == 200
+    assert updated_snapshot.json()["initial_cash"] == 25000
+    assert updated_snapshot.json()["metrics"]["benchmark_ticker"] == "QQQ"
 
 
-def test_workspace_and_book_validation_rejects_invalid_requests(client, db_session):
+def test_workspace_and_book_validation_reject_invalid_requests(client, db_session):
     seed_workspace_prices(db_session)
     future_start = date.today() + timedelta(days=1)
 
@@ -242,9 +275,10 @@ def test_workspace_and_book_validation_rejects_invalid_requests(client, db_sessi
     assert future_workspace.json()["detail"]["code"] == "workspace_invalid"
 
     workspace_id = create_workspace(client, date.today() - timedelta(days=30))
+    collection_id = default_collection_id(client, workspace_id)
 
     overweight = client.post(
-        f"/api/v1/workspaces/{workspace_id}/books",
+        f"/api/v1/collections/{collection_id}/books",
         json={
             "name": "Too Heavy",
             "description": "",
@@ -258,7 +292,7 @@ def test_workspace_and_book_validation_rejects_invalid_requests(client, db_sessi
     assert overweight.json()["detail"]["code"] == "book_invalid"
 
     duplicates = client.post(
-        f"/api/v1/workspaces/{workspace_id}/books",
+        f"/api/v1/collections/{collection_id}/books",
         json={
             "name": "Duplicates",
             "description": "",
@@ -272,7 +306,7 @@ def test_workspace_and_book_validation_rejects_invalid_requests(client, db_sessi
     assert duplicates.json()["detail"]["code"] == "book_invalid"
 
     empty = client.post(
-        f"/api/v1/workspaces/{workspace_id}/books",
+        f"/api/v1/collections/{collection_id}/books",
         json={
             "name": "Empty",
             "description": "",
@@ -282,7 +316,140 @@ def test_workspace_and_book_validation_rejects_invalid_requests(client, db_sessi
     assert empty.status_code == 422
     assert empty.json()["detail"]["code"] == "book_invalid"
 
-    assert client.get(f"/api/v1/workspaces/{workspace_id}/books").json() == []
+    view = client.get(f"/api/v1/workspaces/{workspace_id}/view")
+    assert view.status_code == 200
+    assert view.json()["collections"][0]["books"] == []
+
+
+def test_workspace_availability_rejects_unavailable_book(client, monkeypatch):
+    patch_1998_opening_session(monkeypatch)
+    workspace_id = create_workspace(client, date(1998, 2, 18))
+    collection_id = default_collection_id(client, workspace_id)
+
+    availability = client.post(
+        f"/api/v1/workspaces/{workspace_id}/availability",
+        json={"tickers": ["VTI", "QQQ", "TLT", "GLD"]},
+    )
+    assert availability.status_code == 200
+    payload = availability.json()
+    assert payload["opening_session"] == "1998-02-18"
+    availability_by_ticker = {item["ticker"]: item for item in payload["tickers"]}
+    assert availability_by_ticker["VTI"]["available"] is True
+    assert availability_by_ticker["QQQ"]["available"] is True
+    assert availability_by_ticker["TLT"]["available"] is True
+    assert availability_by_ticker["GLD"]["available"] is False
+    assert availability_by_ticker["GLD"]["first_tradable_date"] == "2004-11-18"
+
+    create_core = client.post(
+        f"/api/v1/collections/{collection_id}/books",
+        json={
+            "name": "Core",
+            "description": "Preset spread",
+            "strategy_kind": "preset",
+            "preset_id": "core",
+            "allocations": [
+                {"ticker": "VTI", "asset_type": "etf", "weight": 60},
+                {"ticker": "QQQ", "asset_type": "etf", "weight": 20},
+                {"ticker": "GLD", "asset_type": "etf", "weight": 10},
+                {"ticker": "TLT", "asset_type": "etf", "weight": 10},
+            ],
+        },
+    )
+    assert create_core.status_code == 422
+    assert create_core.json()["detail"]["code"] == "book_unavailable_for_workspace"
+
+    view = client.get(f"/api/v1/workspaces/{workspace_id}/view")
+    assert view.status_code == 200
+    assert view.json()["collections"][0]["books"] == []
+
+
+def test_workspace_delete_removes_workspace_from_followup_list(client, db_session):
+    prices = seed_workspace_prices(db_session)
+    workspace_start = first_monday(prices["VTI"]) - timedelta(days=2)
+    workspace_id = create_workspace(client, workspace_start)
+    collection_id = default_collection_id(client, workspace_id)
+
+    create_book(
+        client,
+        collection_id,
+        {
+            "name": "Core",
+            "description": "Preset spread",
+            "strategy_kind": "preset",
+            "preset_id": "core",
+            "allocations": [
+                {"ticker": "VTI", "asset_type": "etf", "weight": 60},
+                {"ticker": "QQQ", "asset_type": "etf", "weight": 20},
+                {"ticker": "GLD", "asset_type": "etf", "weight": 10},
+                {"ticker": "TLT", "asset_type": "etf", "weight": 10},
+            ],
+        },
+    )
+
+    deleted = client.delete(f"/api/v1/workspaces/{workspace_id}")
+    assert deleted.status_code == 204
+
+    listing = client.get("/api/v1/workspaces")
+    assert listing.status_code == 200
+    assert all(item["id"] != workspace_id for item in listing.json())
+
+    workspace = client.get(f"/api/v1/workspaces/{workspace_id}")
+    assert workspace.status_code == 404
+
+
+def test_blocked_legacy_book_returns_blocked_view_comparison_and_snapshot_error(client, db_session, monkeypatch):
+    patch_1998_opening_session(monkeypatch)
+
+    workspace = Workspace(
+        name="February 18, 1998",
+        start_date=date(1998, 2, 18),
+        initial_cash=Decimal("10000"),
+    )
+    collection = BookCollection(name="Collection 1", initial_cash=Decimal("10000"), workspace=workspace)
+    book = Portfolio(
+        workspace=workspace,
+        collection=collection,
+        name="Core",
+        description="Legacy seeded book",
+        initial_cash=Decimal("10000"),
+        strategy_kind="preset",
+        preset_id="core",
+    )
+    book.allocations = [
+        BookAllocation(asset_type="etf", ticker="VTI", weight=Decimal("60"), sort_order=0),
+        BookAllocation(asset_type="etf", ticker="QQQ", weight=Decimal("20"), sort_order=1),
+        BookAllocation(asset_type="etf", ticker="GLD", weight=Decimal("10"), sort_order=2),
+        BookAllocation(asset_type="etf", ticker="TLT", weight=Decimal("10"), sort_order=3),
+    ]
+    book.positions = [
+        Position(asset_type="etf", ticker="VTI", shares=Decimal("1"), entry_price=Decimal("100"), entry_date=date(1998, 2, 18), notes=""),
+        Position(asset_type="etf", ticker="QQQ", shares=Decimal("1"), entry_price=Decimal("100"), entry_date=date(1998, 2, 18), notes=""),
+        Position(asset_type="etf", ticker="TLT", shares=Decimal("1"), entry_price=Decimal("100"), entry_date=date(1998, 2, 18), notes=""),
+        Position(asset_type="etf", ticker="GLD", shares=Decimal("1"), entry_price=Decimal("100"), entry_date=date(2004, 11, 18), notes=""),
+    ]
+    db_session.add(workspace)
+    db_session.add(collection)
+    db_session.add(book)
+    db_session.commit()
+
+    view = client.get(f"/api/v1/workspaces/{workspace.id}/view")
+    assert view.status_code == 200
+    view_payload = view.json()
+    assert view_payload["workspace"]["run_state"]["status"] == "blocked"
+    assert view_payload["collections"][0]["run_state"]["status"] == "blocked"
+    assert view_payload["collections"][0]["books"][0]["run_state"]["status"] == "blocked"
+    assert "GLD" in view_payload["collections"][0]["books"][0]["run_state"]["issues"][0]["message"]
+
+    comparison = client.post(
+        f"/api/v1/workspaces/{workspace.id}/comparison",
+        json={"benchmark_tickers": ["SPY"], "primary_benchmark_ticker": "SPY"},
+    )
+    assert comparison.status_code == 200
+    assert comparison.json()["points"] == []
+
+    snapshot = client.get(f"/api/v1/books/{book.id}/snapshot", params={"as_of": "1998-02-18"})
+    assert snapshot.status_code == 409
+    assert snapshot.json()["detail"]["code"] == "book_blocked"
 
 
 def test_disabled_capability_routes(client):

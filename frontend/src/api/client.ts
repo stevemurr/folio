@@ -3,6 +3,19 @@ export type ApiError = {
   message: string;
 };
 
+export type RunStateIssue = {
+  code: string;
+  message: string;
+  ticker?: string | null;
+  first_tradable_date?: string | null;
+};
+
+export type RunState = {
+  status: "draft" | "ready" | "blocked";
+  opening_session?: string | null;
+  issues: RunStateIssue[];
+};
+
 export type BootstrapConfig = {
   risk_free_rate: number;
   benchmark_ticker: string;
@@ -60,22 +73,34 @@ export type WorkspaceSummary = {
   start_date: string;
   created_at: string;
   book_count: number;
+  collection_count: number;
+  run_state: RunState;
 };
 
-export type WorkspaceBenchmark = {
-  ticker: string;
-  is_primary: boolean;
-};
-
-export type WorkspaceDetail = WorkspaceSummary & {
-  initial_cash: number;
-  benchmarks: WorkspaceBenchmark[];
-};
+export type WorkspaceDetail = WorkspaceSummary;
 
 export type WorkspaceUpdateRequest = {
+  name?: string;
+};
+
+export type CollectionCreateRequest = {
+  name?: string | null;
+  initial_cash: number;
+};
+
+export type CollectionUpdateRequest = {
+  name?: string;
   initial_cash?: number;
-  benchmark_tickers?: string[];
-  primary_benchmark_ticker?: string;
+};
+
+export type CollectionSummary = {
+  id: string;
+  workspace_id: string;
+  name: string;
+  created_at: string;
+  initial_cash: number;
+  book_count: number;
+  run_state: RunState;
 };
 
 export type BookAllocationCreate = {
@@ -112,16 +137,21 @@ export type BookUpdateRequest = {
 export type BookConfig = {
   id: string;
   workspace_id: string;
+  collection_id?: string | null;
+  collection_name?: string | null;
   name: string;
   description: string;
   strategy_kind: BookStrategyKind;
   preset_id?: string | null;
   allocations: BookAllocationCreate[];
+  run_state: RunState;
 };
 
 export type BookSummary = {
   id: string;
   workspace_id: string;
+  collection_id?: string | null;
+  collection_name?: string | null;
   name: string;
   description: string;
   created_at: string;
@@ -133,6 +163,7 @@ export type BookSummary = {
   preset_id?: string | null;
   allocation_preview: BookAllocationPreview[];
   cash_weight: number;
+  run_state: RunState;
 };
 
 export type BookMetrics = {
@@ -184,6 +215,8 @@ export type AllocationSlice = {
 export type BookSnapshot = {
   id: string;
   workspace_id: string;
+  collection_id?: string | null;
+  collection_name?: string | null;
   name: string;
   description: string;
   created_at: string;
@@ -201,25 +234,51 @@ export type WorkspaceComparisonPoint = {
   book_values: Record<string, number>;
 };
 
+export type WorkspaceComparisonBenchmarkSeries = {
+  key: string;
+  ticker: string;
+  label: string;
+  collection_id?: string | null;
+  collection_name?: string | null;
+  is_primary: boolean;
+  initial_cash: number;
+};
+
 export type WorkspaceComparison = {
   workspace_id: string;
   primary_benchmark_ticker: string;
   benchmark_tickers: string[];
+  benchmark_series: WorkspaceComparisonBenchmarkSeries[];
   start_date: string;
   end_date: string;
   points: WorkspaceComparisonPoint[];
 };
 
-export type WorkspaceView = {
-  workspace: WorkspaceDetail;
-  books: BookSummary[];
-  comparison: WorkspaceComparison;
+export type WorkspaceComparisonRequest = {
+  benchmark_tickers: string[];
+  primary_benchmark_ticker?: string | null;
 };
 
-export type BookCreateResult = {
-  book: BookSummary;
-  workspace_view: WorkspaceView;
-  snapshot: BookSnapshot;
+export type CollectionDetail = CollectionSummary & {
+  books: BookSummary[];
+};
+
+export type WorkspaceView = {
+  workspace: WorkspaceDetail;
+  collections: CollectionDetail[];
+};
+
+export type WorkspaceTickerAvailability = {
+  ticker: string;
+  available: boolean;
+  first_tradable_date?: string | null;
+};
+
+export type WorkspaceAvailabilityResponse = {
+  workspace_id: string;
+  opening_session?: string | null;
+  issues: RunStateIssue[];
+  tickers: WorkspaceTickerAvailability[];
 };
 
 export type MarketSearchResult = {
@@ -422,12 +481,12 @@ export const api = {
     }),
   listWorkspaces: () => request<WorkspaceSummary[]>("/workspaces"),
   createWorkspace: (payload: { start_date: string }) =>
-    request<WorkspaceView>("/workspaces", {
+    request<WorkspaceDetail>("/workspaces", {
       method: "POST",
       body: JSON.stringify(payload),
     }),
   updateWorkspace: (workspaceId: string, payload: WorkspaceUpdateRequest) =>
-    request<WorkspaceView>(`/workspaces/${workspaceId}`, {
+    request<WorkspaceDetail>(`/workspaces/${workspaceId}`, {
       method: "PATCH",
       body: JSON.stringify(payload),
     }),
@@ -436,23 +495,50 @@ export const api = {
     request<WorkspaceView>(`/workspaces/${workspaceId}/view`, { signal }),
   deleteWorkspace: (workspaceId: string) =>
     request<void>(`/workspaces/${workspaceId}`, { method: "DELETE" }),
+  createCollection: (workspaceId: string, payload: CollectionCreateRequest) =>
+    request<CollectionSummary>(`/workspaces/${workspaceId}/collections`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  updateCollection: (collectionId: string, payload: CollectionUpdateRequest) =>
+    request<CollectionSummary>(`/collections/${collectionId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  deleteCollection: (collectionId: string) =>
+    request<void>(`/collections/${collectionId}`, { method: "DELETE" }),
   listBooks: (workspaceId: string) => request<BookSummary[]>(`/workspaces/${workspaceId}/books`),
-  createBook: (workspaceId: string, payload: BookCreateRequest) =>
-    request<BookCreateResult>(`/workspaces/${workspaceId}/books`, {
+  createBook: (collectionId: string, payload: BookCreateRequest) =>
+    request<BookSummary>(`/collections/${collectionId}/books`, {
       method: "POST",
       body: JSON.stringify(payload),
     }),
   getBookConfig: (bookId: string, signal?: AbortSignal) => request<BookConfig>(`/books/${bookId}/config`, { signal }),
   updateBook: (bookId: string, payload: BookUpdateRequest) =>
-    request<BookCreateResult>(`/books/${bookId}`, {
+    request<BookSummary>(`/books/${bookId}`, {
       method: "PATCH",
       body: JSON.stringify(payload),
     }),
   deleteBook: (bookId: string) => request<void>(`/books/${bookId}`, { method: "DELETE" }),
-  getWorkspaceComparison: (workspaceId: string) =>
-    request<WorkspaceComparison>(`/workspaces/${workspaceId}/comparison`),
-  getBookSnapshot: (bookId: string, asOf: string, signal?: AbortSignal) =>
-    request<BookSnapshot>(`/books/${bookId}/snapshot?as_of=${encodeURIComponent(asOf)}`, { signal }),
+  getWorkspaceAvailability: (workspaceId: string, tickers: string[], signal?: AbortSignal) =>
+    request<WorkspaceAvailabilityResponse>(`/workspaces/${workspaceId}/availability`, {
+      method: "POST",
+      signal,
+      body: JSON.stringify({ tickers }),
+    }),
+  getWorkspaceComparison: (workspaceId: string, payload: WorkspaceComparisonRequest, signal?: AbortSignal) =>
+    request<WorkspaceComparison>(`/workspaces/${workspaceId}/comparison`, {
+      method: "POST",
+      signal,
+      body: JSON.stringify(payload),
+    }),
+  getBookSnapshot: (bookId: string, asOf: string, benchmarkTicker?: string | null, signal?: AbortSignal) => {
+    const params = new URLSearchParams({ as_of: asOf });
+    if (benchmarkTicker) {
+      params.set("benchmark_ticker", benchmarkTicker);
+    }
+    return request<BookSnapshot>(`/books/${bookId}/snapshot?${params.toString()}`, { signal });
+  },
   searchMarket: (query: string, signal?: AbortSignal) =>
     request<MarketSearchResult[]>(`/market/search?q=${encodeURIComponent(query)}`, { signal }),
   searchRealEstate: (query: string) =>

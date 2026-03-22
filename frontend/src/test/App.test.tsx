@@ -1,19 +1,26 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "../App";
 import {
-  BookConfig,
-  BookCreateRequest,
+  AppSettings,
   BookSnapshot,
   BookSummary,
-  MarketSearchResult,
+  CollectionDetail,
+  RunState,
   WorkspaceComparison,
-  WorkspaceBenchmark,
+  WorkspaceDetail,
   WorkspaceSummary,
   WorkspaceView,
 } from "../api/client";
+
+function jsonResponse(payload: unknown, status = 200) {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
 
 function bootstrapPayload(agentEnabled = false) {
   return {
@@ -23,7 +30,7 @@ function bootstrapPayload(agentEnabled = false) {
   };
 }
 
-function appSettingsPayload(agentEnabled = false) {
+function appSettingsPayload(agentEnabled = false): AppSettings {
   return {
     database: { engine: "sqlite", path: "~/.folio/folio.db" },
     market: { risk_free_rate: 4.25, benchmark_ticker: "SPY", cache_ttl_days: 1 },
@@ -40,90 +47,131 @@ function appSettingsPayload(agentEnabled = false) {
   };
 }
 
-function makeWorkspace(id: string, name: string, startDate: string, bookCount: number): WorkspaceSummary {
+function makeRunState(status: RunState["status"], openingSession = "2020-03-23", issues: RunState["issues"] = []): RunState {
+  return {
+    status,
+    opening_session: openingSession,
+    issues,
+  };
+}
+
+function makeWorkspace(id: string, name: string, startDate: string, bookCount: number, collectionCount: number): WorkspaceSummary {
   return {
     id,
     name,
     start_date: startDate,
     created_at: "2026-03-20T00:00:00Z",
     book_count: bookCount,
+    collection_count: collectionCount,
+    run_state: makeRunState(bookCount > 0 ? "ready" : "draft", startDate),
   };
 }
 
-function makeBook(id: string, workspaceId: string, name: string, description: string): BookSummary {
+function makeBook(
+  id: string,
+  workspaceId: string,
+  collectionId: string,
+  collectionName: string,
+  name: string,
+  initialCash = 10000,
+  runState?: RunState,
+): BookSummary {
   return {
     id,
     workspace_id: workspaceId,
+    collection_id: collectionId,
+    collection_name: collectionName,
     name,
-    description,
+    description: `${name} description`,
     created_at: "2026-03-20T00:00:00Z",
     base_currency: "USD",
-    initial_cash: 10000,
+    initial_cash: initialCash,
     open_positions: 1,
     total_positions: 1,
     strategy_kind: "custom",
     preset_id: null,
-    allocation_preview: [],
+    allocation_preview: [{ ticker: "VTI", asset_type: "etf", weight: 100 }],
     cash_weight: 0,
+    run_state: runState ?? makeRunState("ready"),
   };
 }
 
-function defaultBenchmarks(primary = "SPY"): WorkspaceBenchmark[] {
-  return [{ ticker: primary, is_primary: true }];
+function makeCollection(
+  id: string,
+  workspaceId: string,
+  name: string,
+  initialCash: number,
+  books: BookSummary[],
+  runState?: RunState,
+): CollectionDetail {
+  return {
+    id,
+    workspace_id: workspaceId,
+    name,
+    created_at: "2026-03-20T00:00:00Z",
+    initial_cash: initialCash,
+    book_count: books.length,
+    run_state: runState ?? makeRunState(books.length ? "ready" : "draft"),
+    books,
+  };
 }
 
-function makeComparison(
-  workspaceId: string,
-  startDate: string,
-  rows: Array<{
-    date: string;
-    benchmark: number;
-    values: Record<string, number>;
-  }>,
-): WorkspaceComparison {
+function makeWorkspaceView(workspace: WorkspaceSummary, collections: CollectionDetail[]): WorkspaceView {
+  return {
+    workspace: {
+      ...workspace,
+      book_count: collections.reduce((sum, collection) => sum + collection.books.length, 0),
+      collection_count: collections.length,
+      run_state: collections.some((collection) => collection.run_state.status === "ready")
+        ? makeRunState("ready", workspace.start_date)
+        : makeRunState("draft", workspace.start_date),
+    } satisfies WorkspaceDetail,
+    collections,
+  };
+}
+
+function makeComparison(workspaceId: string, collections: CollectionDetail[], benchmarkTickers: string[], primary: string): WorkspaceComparison {
+  const readyCollections = collections.filter((collection) => collection.run_state.status === "ready");
+  const books = readyCollections.flatMap((collection) => collection.books);
+  const bankrolls = [...new Set(readyCollections.map((collection) => collection.initial_cash))];
+  const benchmarkSeries = bankrolls.flatMap((initialCash) =>
+    benchmarkTickers.map((ticker) => ({
+      key: `${initialCash}:${ticker}`,
+      ticker,
+      label: bankrolls.length > 1 ? `${ticker} · $${initialCash.toLocaleString("en-US")}` : ticker,
+      collection_id: null,
+      collection_name: null,
+      is_primary: ticker === primary,
+      initial_cash: initialCash,
+    })),
+  );
+  const dates = ["2020-03-23", "2020-03-24", "2020-03-25"];
+
   return {
     workspace_id: workspaceId,
-    primary_benchmark_ticker: "SPY",
-    benchmark_tickers: ["SPY"],
-    start_date: startDate,
-    end_date: rows[rows.length - 1]?.date ?? startDate,
-    points: rows.map((row) => ({
-      date: row.date,
-      benchmark_values: { SPY: row.benchmark },
-      book_values: row.values,
+    primary_benchmark_ticker: primary,
+    benchmark_tickers: benchmarkTickers,
+    benchmark_series: benchmarkSeries,
+    start_date: dates[0],
+    end_date: dates[dates.length - 1],
+    points: dates.map((currentDate, index) => ({
+      date: currentDate,
+      benchmark_values: Object.fromEntries(
+        benchmarkSeries.map((series) => [series.key, series.initial_cash * (1 + index * 0.02)]),
+      ),
+      book_values: Object.fromEntries(
+        books.map((book) => [book.id, book.initial_cash * (1 + index * 0.03)]),
+      ),
     })),
   };
 }
 
-function makeWorkspaceView(
-  workspace: WorkspaceSummary,
-  books: BookSummary[],
-  comparison: WorkspaceComparison,
-  meta?: { initial_cash?: number; benchmarks?: WorkspaceBenchmark[] },
-): WorkspaceView {
-  return {
-    workspace: {
-      ...workspace,
-      book_count: books.length,
-      initial_cash: meta?.initial_cash ?? 10000,
-      benchmarks: meta?.benchmarks ?? defaultBenchmarks(),
-    },
-    books,
-    comparison,
-  };
-}
-
-function makeSnapshot(
-  book: BookSummary,
-  asOf: string,
-  ticker: string,
-  totalValue: number,
-  currentCash = 500,
-): BookSnapshot {
-  const investedValue = totalValue - currentCash;
+function makeSnapshot(book: BookSummary, asOf: string, benchmarkTicker: string): BookSnapshot {
   return {
     id: book.id,
     workspace_id: book.workspace_id,
+    collection_id: book.collection_id,
+    collection_name: book.collection_name,
     name: book.name,
     description: book.description,
     created_at: book.created_at,
@@ -132,9 +180,9 @@ function makeSnapshot(
     as_of: asOf,
     metrics: {
       book_id: book.id,
-      total_value: totalValue,
-      current_cash: currentCash,
-      simple_roi: totalValue / 10000 - 1,
+      total_value: book.initial_cash * 1.1,
+      current_cash: 500,
+      simple_roi: 0.1,
       annualized_return: 0.12,
       sharpe_ratio: 1.18,
       benchmark_sharpe_ratio: 1.04,
@@ -142,684 +190,363 @@ function makeSnapshot(
       alpha: 0.03,
       beta: 0.92,
       benchmark_return: 0.07,
-      benchmark_ticker: "SPY",
+      benchmark_ticker: benchmarkTicker,
       risk_free_rate: 4.25,
       position_count: 1,
       open_position_count: 1,
     },
     positions: [
       {
-        id: `${book.id}-${ticker}-${asOf}`,
+        id: `${book.id}-position`,
         book_id: book.id,
-        asset_type: ticker === "AAPL" ? "stock" : "etf",
-        ticker,
+        asset_type: "etf",
+        ticker: "VTI",
         shares: 10,
         entry_price: 100,
-        entry_date: "1998-02-18",
+        entry_date: "2020-03-23",
         exit_price: null,
         exit_date: null,
         notes: "",
         status: "open",
-        current_price: investedValue / 10,
-        current_value: investedValue,
-        dollar_pnl: investedValue - 1000,
-        simple_roi: investedValue / 1000 - 1,
+        current_price: 110,
+        current_value: 1100,
+        dollar_pnl: 100,
+        simple_roi: 0.1,
         annualized_return: 0.12,
         sharpe_ratio: 1.18,
-        weight: investedValue / totalValue,
+        weight: 0.9,
       },
     ],
     allocation: [
-      { label: ticker, ticker, value: investedValue, weight: investedValue / totalValue },
-      { label: "Cash", ticker: "CASH", value: currentCash, weight: currentCash / totalValue },
+      { label: "VTI", ticker: "VTI", value: 1100, weight: 0.688 },
+      { label: "Cash", ticker: "CASH", value: 500, weight: 0.312 },
     ],
   };
 }
 
-function jsonResponse(payload: unknown, status = 200) {
-  return new Response(JSON.stringify(payload), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-}
-
 type MockState = {
-  booksByWorkspace: Record<string, BookSummary[]>;
-  bookConfigsById: Record<string, BookConfig>;
-  createdBookPayloads: Array<{ payload: BookCreateRequest; workspaceId: string }>;
-  createdWorkspacePayloads: Array<{ start_date: string }>;
+  appSettings: AppSettings;
+  bootstrap: ReturnType<typeof bootstrapPayload>;
+  comparisonRequests: Array<{ workspaceId: string; payload: { benchmark_tickers: string[]; primary_benchmark_ticker?: string | null } }>;
+  settingsPatches: Array<Record<string, unknown>>;
+  snapshotRequests: string[];
+  viewByWorkspaceId: Record<string, WorkspaceView>;
   workspaces: WorkspaceSummary[];
-  workspaceMetaById: Record<string, { initial_cash: number; benchmarks: WorkspaceBenchmark[] }>;
 };
 
-type MockScenario = {
-  bookConfigsById?: Record<string, BookConfig>;
-  booksByWorkspace?: Record<string, BookSummary[]>;
-  comparisonsByWorkspace?: Record<string, WorkspaceComparison>;
-  createBook?: (workspaceId: string, payload: BookCreateRequest, state: MockState) => BookSummary;
-  createWorkspace?: (payload: { start_date: string }, state: MockState) => WorkspaceSummary;
-  resolveComparison?: (workspaceId: string, state: MockState) => WorkspaceComparison;
-  resolveSnapshot?: (bookId: string, asOf: string, state: MockState) => BookSnapshot;
-  searchResults?: Record<string, MarketSearchResult[]>;
-  snapshotsByBook?: Record<string, Record<string, BookSnapshot>>;
-  workspaces?: WorkspaceSummary[];
-  workspaceMetaById?: Record<string, { initial_cash: number; benchmarks: WorkspaceBenchmark[] }>;
-};
-
-function cloneRecord<T extends Record<string, unknown>>(value: Record<string, T[]> | undefined): Record<string, T[]> {
-  return Object.fromEntries(
-    Object.entries(value ?? {}).map(([key, entries]) => [key, entries.map((entry) => ({ ...entry }))]),
-  );
-}
-
-function cloneWorkspaceMetaRecord(
-  value: Record<string, { initial_cash: number; benchmarks: WorkspaceBenchmark[] }> | undefined,
-): Record<string, { initial_cash: number; benchmarks: WorkspaceBenchmark[] }> {
-  return Object.fromEntries(
-    Object.entries(value ?? {}).map(([key, meta]) => [
-      key,
-      {
-        initial_cash: meta.initial_cash,
-        benchmarks: meta.benchmarks.map((benchmark) => ({ ...benchmark })),
-      },
-    ]),
-  );
-}
-
-function cloneBookConfigs(value: Record<string, BookConfig> | undefined): Record<string, BookConfig> {
-  return Object.fromEntries(
-    Object.entries(value ?? {}).map(([key, config]) => [
-      key,
-      {
-        ...config,
-        allocations: config.allocations.map((allocation) => ({ ...allocation })),
-      },
-    ]),
-  );
-}
-
-function defaultBookConfig(book: BookSummary): BookConfig {
-  return {
-    id: book.id,
-    workspace_id: book.workspace_id,
-    name: book.name,
-    description: book.description,
-    strategy_kind: book.strategy_kind,
-    preset_id: book.preset_id ?? null,
-    allocations:
-      book.allocation_preview.length > 0
-        ? book.allocation_preview.map((allocation) => ({
-            ticker: allocation.ticker,
-            asset_type: allocation.asset_type,
-            weight: allocation.weight,
-          }))
-        : [{ ticker: "VTI", asset_type: "etf", weight: 100 }],
-  };
-}
-
-function installFetchMock(scenario: MockScenario) {
-  const state: MockState = {
-    workspaces: (scenario.workspaces ?? []).map((workspace) => ({ ...workspace })),
-    booksByWorkspace: cloneRecord(scenario.booksByWorkspace),
-    bookConfigsById: cloneBookConfigs(scenario.bookConfigsById),
-    createdWorkspacePayloads: [],
-    createdBookPayloads: [],
-    workspaceMetaById: cloneWorkspaceMetaRecord(scenario.workspaceMetaById),
-  };
-
-  for (const workspace of state.workspaces) {
-    state.workspaceMetaById[workspace.id] ??= {
-      initial_cash: 10000,
-      benchmarks: defaultBenchmarks(),
-    };
-  }
-
-  for (const books of Object.values(state.booksByWorkspace)) {
-    for (const book of books) {
-      state.bookConfigsById[book.id] ??= defaultBookConfig(book);
-    }
-  }
-
-  function emptyComparison(workspaceId: string): WorkspaceComparison {
-    const workspace = state.workspaces.find((item) => item.id === workspaceId);
-    const startDate = workspace?.start_date ?? "1998-02-18";
-    return {
-      workspace_id: workspaceId,
-      primary_benchmark_ticker: "SPY",
-      benchmark_tickers: ["SPY"],
-      start_date: startDate,
-      end_date: startDate,
-      points: [],
-    };
-  }
-
-  function workspaceViewPayload(workspaceId: string): WorkspaceView {
-    const workspace = state.workspaces.find((item) => item.id === workspaceId);
-    if (!workspace) {
-      throw new Error(`Missing workspace ${workspaceId}`);
-    }
-    const books = state.booksByWorkspace[workspaceId] ?? [];
-    const comparison =
-      scenario.resolveComparison?.(workspaceId, state) ??
-      scenario.comparisonsByWorkspace?.[workspaceId] ??
-      emptyComparison(workspaceId);
-    return makeWorkspaceView(workspace, books, comparison, state.workspaceMetaById[workspaceId]);
-  }
-
+function renderApp(state: MockState) {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-    const method = init?.method ?? "GET";
+    const request = input instanceof Request ? input : null;
     const url = new URL(typeof input === "string" ? input : input.toString(), "http://localhost");
+    const method = init?.method ?? request?.method ?? "GET";
     const path = url.pathname;
 
     if (method === "GET" && path === "/api/v1/app/bootstrap") {
-      return jsonResponse(bootstrapPayload());
+      return jsonResponse(state.bootstrap);
     }
-    if (method === "GET" && path === "/api/v1/app/settings") {
-      return jsonResponse(appSettingsPayload());
+
+    if (path === "/api/v1/app/settings") {
+      if (method === "GET") {
+        return jsonResponse(state.appSettings);
+      }
+      if (method === "PATCH") {
+        const payload = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+        state.settingsPatches.push(payload);
+        if (payload.market && typeof payload.market === "object") {
+          state.appSettings.market = { ...state.appSettings.market, ...(payload.market as Partial<AppSettings["market"]>) };
+          state.bootstrap = {
+            ...state.bootstrap,
+            benchmark_ticker: state.appSettings.market.benchmark_ticker,
+            risk_free_rate: state.appSettings.market.risk_free_rate,
+          };
+        }
+        return jsonResponse(state.appSettings);
+      }
     }
+
     if (method === "GET" && path === "/api/v1/workspaces") {
       return jsonResponse(state.workspaces);
-    }
-    if (method === "POST" && path === "/api/v1/workspaces") {
-      const payload = JSON.parse(String(init?.body ?? "{}")) as { start_date: string };
-      state.createdWorkspacePayloads.push(payload);
-      const created =
-        scenario.createWorkspace?.(payload, state) ??
-        makeWorkspace(`ws-${state.workspaces.length + 1}`, `Workspace ${state.workspaces.length + 1}`, payload.start_date, 0);
-      state.workspaces.push(created);
-      state.workspaceMetaById[created.id] = {
-        initial_cash: 10000,
-        benchmarks: defaultBenchmarks(),
-      };
-      return jsonResponse(workspaceViewPayload(created.id), 201);
-    }
-
-    const workspaceComparisonMatch = path.match(/^\/api\/v1\/workspaces\/([^/]+)\/comparison$/);
-    if (method === "GET" && workspaceComparisonMatch) {
-      const workspaceId = workspaceComparisonMatch[1];
-      const payload =
-        scenario.resolveComparison?.(workspaceId, state) ??
-        scenario.comparisonsByWorkspace?.[workspaceId] ??
-        emptyComparison(workspaceId);
-      return jsonResponse(payload);
-    }
-
-    const workspaceBooksMatch = path.match(/^\/api\/v1\/workspaces\/([^/]+)\/books$/);
-    if (method === "GET" && workspaceBooksMatch) {
-      return jsonResponse(state.booksByWorkspace[workspaceBooksMatch[1]] ?? []);
-    }
-    if (method === "POST" && workspaceBooksMatch) {
-      const workspaceId = workspaceBooksMatch[1];
-      const payload = JSON.parse(String(init?.body ?? "{}")) as BookCreateRequest;
-      state.createdBookPayloads.push({ payload, workspaceId });
-      const created =
-        scenario.createBook?.(workspaceId, payload, state) ??
-        {
-          ...makeBook(`book-${state.createdBookPayloads.length}`, workspaceId, payload.name, payload.description),
-          strategy_kind: payload.strategy_kind,
-          preset_id: payload.preset_id ?? null,
-          allocation_preview: payload.allocations.map((allocation) => ({
-            ticker: allocation.ticker,
-            asset_type: allocation.asset_type,
-            weight: allocation.weight,
-          })),
-          cash_weight: Math.max(
-            0,
-            100 - payload.allocations.reduce((sum, allocation) => sum + allocation.weight, 0),
-          ),
-        };
-      state.booksByWorkspace[workspaceId] = [...(state.booksByWorkspace[workspaceId] ?? []), created];
-      state.bookConfigsById[created.id] = {
-        id: created.id,
-        workspace_id: workspaceId,
-        name: payload.name,
-        description: payload.description,
-        strategy_kind: payload.strategy_kind,
-        preset_id: payload.preset_id ?? null,
-        allocations: payload.allocations,
-      };
-      state.workspaces = state.workspaces.map((workspace) =>
-        workspace.id === workspaceId ? { ...workspace, book_count: (state.booksByWorkspace[workspaceId] ?? []).length } : workspace,
-      );
-      const snapshotAsOf =
-        payload.snapshot_as_of ??
-        workspaceViewPayload(workspaceId).comparison.points[0]?.date ??
-        state.workspaces.find((workspace) => workspace.id === workspaceId)?.start_date ??
-        "1998-02-18";
-      const snapshot =
-        scenario.resolveSnapshot?.(created.id, snapshotAsOf, state) ??
-        scenario.snapshotsByBook?.[created.id]?.[snapshotAsOf] ??
-        makeSnapshot(created, snapshotAsOf, payload.allocations[0]?.ticker ?? "VTI", 10000);
-      return jsonResponse(
-        {
-          book: created,
-          workspace_view: workspaceViewPayload(workspaceId),
-          snapshot,
-        },
-        201,
-      );
     }
 
     const workspaceViewMatch = path.match(/^\/api\/v1\/workspaces\/([^/]+)\/view$/);
     if (method === "GET" && workspaceViewMatch) {
-      const workspaceId = workspaceViewMatch[1];
+      return jsonResponse(state.viewByWorkspaceId[workspaceViewMatch[1]]);
+    }
+
+    const deleteWorkspaceMatch = path.match(/^\/api\/v1\/workspaces\/([^/]+)$/);
+    if (method === "DELETE" && deleteWorkspaceMatch) {
+      const workspaceId = deleteWorkspaceMatch[1];
+      state.workspaces = state.workspaces.filter((workspace) => workspace.id !== workspaceId);
+      delete state.viewByWorkspaceId[workspaceId];
+      return new Response(null, { status: 204 });
+    }
+
+    const createCollectionMatch = path.match(/^\/api\/v1\/workspaces\/([^/]+)\/collections$/);
+    if (method === "POST" && createCollectionMatch) {
+      const workspaceId = createCollectionMatch[1];
+      const view = state.viewByWorkspaceId[workspaceId];
+      const payload = JSON.parse(String(init?.body ?? "{}")) as { initial_cash: number; name?: string };
+      const nextId = `collection-${view.collections.length + 1}`;
+      const name = payload.name ?? `Collection ${view.collections.length + 1}`;
+      const collection = makeCollection(nextId, workspaceId, name, payload.initial_cash, []);
+      view.collections.push(collection);
+      view.workspace.collection_count = view.collections.length;
       const workspace = state.workspaces.find((item) => item.id === workspaceId);
-      return workspace ? jsonResponse(workspaceViewPayload(workspaceId)) : jsonResponse({ detail: { code: "missing", message: "Missing" } }, 404);
-    }
-
-    const workspaceDetailMatch = path.match(/^\/api\/v1\/workspaces\/([^/]+)$/);
-    if (method === "PATCH" && workspaceDetailMatch) {
-      const workspaceId = workspaceDetailMatch[1];
-      const workspace = state.workspaces.find((item) => item.id === workspaceId);
-      if (!workspace) {
-        return jsonResponse({ detail: { code: "missing", message: "Missing" } }, 404);
+      if (workspace) {
+        workspace.collection_count = view.collections.length;
       }
-
-      const payload = JSON.parse(String(init?.body ?? "{}")) as {
-        initial_cash?: number;
-        benchmark_tickers?: string[];
-        primary_benchmark_ticker?: string;
-      };
-      const currentMeta = state.workspaceMetaById[workspaceId] ?? { initial_cash: 10000, benchmarks: defaultBenchmarks() };
-      const benchmarkTickers =
-        payload.benchmark_tickers ??
-        currentMeta.benchmarks.map((benchmark) => benchmark.ticker);
-      const primary =
-        payload.primary_benchmark_ticker ??
-        currentMeta.benchmarks.find((benchmark) => benchmark.is_primary)?.ticker ??
-        benchmarkTickers[0] ??
-        "SPY";
-
-      state.workspaceMetaById[workspaceId] = {
-        initial_cash: payload.initial_cash ?? currentMeta.initial_cash,
-        benchmarks: benchmarkTickers.map((ticker) => ({ ticker, is_primary: ticker === primary })),
-      };
-
-      return jsonResponse(workspaceViewPayload(workspaceId));
-    }
-    if (method === "GET" && workspaceDetailMatch) {
-      const workspace = state.workspaces.find((item) => item.id === workspaceDetailMatch[1]);
-      return workspace
-        ? jsonResponse(makeWorkspaceView(workspace, state.booksByWorkspace[workspace.id] ?? [], emptyComparison(workspace.id), state.workspaceMetaById[workspace.id]).workspace)
-        : jsonResponse({ detail: { code: "missing", message: "Missing" } }, 404);
+      return jsonResponse(collection, 201);
     }
 
-    const bookConfigMatch = path.match(/^\/api\/v1\/books\/([^/]+)\/config$/);
-    if (method === "GET" && bookConfigMatch) {
-      const payload = state.bookConfigsById[bookConfigMatch[1]];
-      return payload ? jsonResponse(payload) : jsonResponse({ detail: { code: "missing", message: "Missing" } }, 404);
-    }
-
-    const bookUpdateMatch = path.match(/^\/api\/v1\/books\/([^/]+)$/);
-    if (method === "PATCH" && bookUpdateMatch) {
-      const bookId = bookUpdateMatch[1];
-      const payload = JSON.parse(String(init?.body ?? "{}")) as BookCreateRequest;
-      const currentConfig = state.bookConfigsById[bookId];
-      if (!currentConfig) {
-        return jsonResponse({ detail: { code: "missing", message: "Missing" } }, 404);
+    const updateCollectionMatch = path.match(/^\/api\/v1\/collections\/([^/]+)$/);
+    if (method === "PATCH" && updateCollectionMatch) {
+      const collectionId = updateCollectionMatch[1];
+      const payload = JSON.parse(String(init?.body ?? "{}")) as { name?: string; initial_cash?: number };
+      const view = Object.values(state.viewByWorkspaceId).find((item) => item.collections.some((collection) => collection.id === collectionId));
+      const collection = view?.collections.find((item) => item.id === collectionId);
+      if (!view || !collection) {
+        return jsonResponse({ detail: { code: "not_found", message: "Missing collection" } }, 404);
       }
-
-      state.bookConfigsById[bookId] = {
-        ...currentConfig,
-        name: payload.name,
-        description: payload.description,
-        strategy_kind: payload.strategy_kind,
-        preset_id: payload.preset_id ?? null,
-        allocations: payload.allocations,
-      };
-
-      let updatedBook: BookSummary | null = null;
-      state.booksByWorkspace[currentConfig.workspace_id] = (state.booksByWorkspace[currentConfig.workspace_id] ?? []).map((book) => {
-        if (book.id !== bookId) {
-          return book;
-        }
-        updatedBook = {
-          ...book,
-          name: payload.name,
-          description: payload.description,
-          strategy_kind: payload.strategy_kind,
-          preset_id: payload.preset_id ?? null,
-          allocation_preview: payload.allocations.map((allocation) => ({
-            ticker: allocation.ticker,
-            asset_type: allocation.asset_type,
-            weight: allocation.weight,
-          })),
-          cash_weight: Math.max(
-            0,
-            100 - payload.allocations.reduce((sum, allocation) => sum + allocation.weight, 0),
-          ),
-        };
-        return updatedBook;
-      });
-
-      const workspaceId = currentConfig.workspace_id;
-      const summary = updatedBook ?? (state.booksByWorkspace[workspaceId] ?? []).find((book) => book.id === bookId);
-      if (!summary) {
-        return jsonResponse({ detail: { code: "missing", message: "Missing" } }, 404);
+      if (payload.name) {
+        collection.name = payload.name;
+        collection.books.forEach((book) => {
+          book.collection_name = payload.name;
+        });
       }
-      const snapshotAsOf =
-        state.workspaces.find((workspace) => workspace.id === workspaceId)?.start_date ?? "1998-02-18";
-      const snapshot =
-        scenario.resolveSnapshot?.(bookId, snapshotAsOf, state) ??
-        scenario.snapshotsByBook?.[bookId]?.[snapshotAsOf] ??
-        makeSnapshot(summary, snapshotAsOf, payload.allocations[0]?.ticker ?? "VTI", state.workspaceMetaById[workspaceId]?.initial_cash ?? 10000);
-      return jsonResponse({
-        book: summary,
-        workspace_view: workspaceViewPayload(workspaceId),
-        snapshot,
-      });
-    }
-
-    const bookSnapshotMatch = path.match(/^\/api\/v1\/books\/([^/]+)\/snapshot$/);
-    if (method === "GET" && bookSnapshotMatch) {
-      const bookId = bookSnapshotMatch[1];
-      const asOf = url.searchParams.get("as_of") ?? "";
-      const payload = scenario.resolveSnapshot?.(bookId, asOf, state) ?? scenario.snapshotsByBook?.[bookId]?.[asOf];
-      return payload ? jsonResponse(payload) : jsonResponse({ detail: { code: "missing", message: "Missing" } }, 404);
-    }
-
-    if (method === "GET" && path === "/api/v1/market/search") {
-      const query = url.searchParams.get("q") ?? "";
-      return jsonResponse(scenario.searchResults?.[query] ?? []);
-    }
-
-    if (method === "DELETE" && path.startsWith("/api/v1/books/")) {
-      const bookId = path.split("/").pop() ?? "";
-      for (const [workspaceId, books] of Object.entries(state.booksByWorkspace)) {
-        state.booksByWorkspace[workspaceId] = books.filter((book) => book.id !== bookId);
-        state.workspaces = state.workspaces.map((workspace) =>
-          workspace.id === workspaceId ? { ...workspace, book_count: state.booksByWorkspace[workspaceId].length } : workspace,
-        );
+      if (payload.initial_cash) {
+        collection.initial_cash = payload.initial_cash;
+        collection.books.forEach((book) => {
+          book.initial_cash = payload.initial_cash as number;
+        });
       }
-      delete state.bookConfigsById[bookId];
-      return jsonResponse(undefined, 204);
+      return jsonResponse(collection);
     }
 
-    if (method === "DELETE" && path.startsWith("/api/v1/workspaces/")) {
-      return jsonResponse(undefined, 204);
+    const comparisonMatch = path.match(/^\/api\/v1\/workspaces\/([^/]+)\/comparison$/);
+    if (method === "POST" && comparisonMatch) {
+      const workspaceId = comparisonMatch[1];
+      const payload = JSON.parse(String(init?.body ?? "{}")) as { benchmark_tickers: string[]; primary_benchmark_ticker?: string | null };
+      state.comparisonRequests.push({ workspaceId, payload });
+      return jsonResponse(
+        makeComparison(
+          workspaceId,
+          state.viewByWorkspaceId[workspaceId].collections,
+          payload.benchmark_tickers,
+          payload.primary_benchmark_ticker ?? payload.benchmark_tickers[0] ?? "SPY",
+        ),
+      );
     }
 
-    return jsonResponse({ detail: { code: "missing", message: `${method} ${path}` } }, 404);
-  }) as typeof fetch;
+    const snapshotMatch = path.match(/^\/api\/v1\/books\/([^/]+)\/snapshot$/);
+    if (method === "GET" && snapshotMatch) {
+      state.snapshotRequests.push(url.toString());
+      const bookId = snapshotMatch[1];
+      const asOf = url.searchParams.get("as_of") ?? "2020-03-23";
+      const benchmarkTicker = url.searchParams.get("benchmark_ticker") ?? "SPY";
+      const book =
+        Object.values(state.viewByWorkspaceId)
+          .flatMap((view) => view.collections)
+          .flatMap((collection) => collection.books)
+          .find((item) => item.id === bookId) ?? null;
+      if (!book) {
+        return jsonResponse({ detail: { code: "not_found", message: "Missing book" } }, 404);
+      }
+      return jsonResponse(makeSnapshot(book, asOf, benchmarkTicker));
+    }
 
-  globalThis.fetch = fetchMock;
-  return { fetchMock, state };
-}
+    return jsonResponse({ detail: { code: "unhandled", message: `${method} ${path}` } }, 500);
+  });
 
-function renderApp() {
-  const client = new QueryClient({
+  vi.stubGlobal("fetch", fetchMock);
+
+  const queryClient = new QueryClient({
     defaultOptions: {
-      queries: { retry: false },
+      queries: { retry: false, gcTime: 0 },
       mutations: { retry: false },
     },
   });
 
-  return render(
-    <QueryClientProvider client={client}>
+  render(
+    <QueryClientProvider client={queryClient}>
       <App />
     </QueryClientProvider>,
   );
+
+  return { fetchMock };
 }
 
-function matchingCalls(fetchMock: typeof fetch, matcher: (url: URL, method: string) => boolean) {
-  return (fetchMock as unknown as { mock: { calls: Array<[RequestInfo | URL, RequestInit | undefined]> } }).mock.calls.filter(
-    ([input, init]) => {
-      const method = init?.method ?? "GET";
-      const url = new URL(typeof input === "string" ? input : input.toString(), "http://localhost");
-      return matcher(url, method);
-    },
-  );
-}
-
-async function clickWorkspaceCard(name: string) {
-  const label = await screen.findByText(name);
-  const button = label.closest("button");
-  if (!button) {
-    throw new Error(`Workspace button for "${name}" was not found.`);
+async function openWorkspace(name: string) {
+  let workspaceButton: HTMLElement | null = null;
+  try {
+    workspaceButton = await screen.findByRole("button", { name: new RegExp(name, "i") });
+  } catch {
+    const browserButton = await screen.findByRole("button", { name: /workspace browser/i });
+    fireEvent.click(browserButton);
+    workspaceButton = await screen.findByRole("button", { name: new RegExp(name, "i") });
   }
-  fireEvent.click(button);
+  fireEvent.click(workspaceButton);
 }
 
 describe("App", () => {
-  it("renders the focused workspace creator when no workspaces exist", async () => {
-    installFetchMock({ workspaces: [] });
-
-    renderApp();
-
-    expect(await screen.findByRole("heading", { name: /Create Workspace/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Create Workspace/i })).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: /Open Workspace/i })).not.toBeInTheDocument();
+  beforeEach(() => {
+    vi.restoreAllMocks();
   });
 
-  it("creates a workspace and lands in the books phase", async () => {
-    const createdWorkspace = makeWorkspace("ws-created", "March 2000", "2000-03-01", 0);
-    const { state } = installFetchMock({
-      workspaces: [],
-      createWorkspace: () => createdWorkspace,
-    });
-
-    renderApp();
-
-    await screen.findByRole("heading", { name: /Create Workspace/i });
-    fireEvent.change(screen.getByLabelText(/Workspace Start Date/i), { target: { value: "2000-03-01" } });
-    fireEvent.click(screen.getByRole("button", { name: /Create Workspace/i }));
-
-    expect(await screen.findByRole("heading", { name: "March 2000" })).toBeInTheDocument();
-    expect(screen.getByText(/Build the books for this age\./i)).toBeInTheDocument();
-    expect(state.createdWorkspacePayloads[0]).toEqual({ start_date: "2000-03-01" });
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
-  it("renders a multi-book workspace and switches between saved workspaces", async () => {
-    const ws1 = makeWorkspace("ws-1", "Tech Bubble", "1998-02-18", 2);
-    const ws2 = makeWorkspace("ws-2", "Recovery Desk", "2009-03-09", 1);
-    const core = makeBook("book-core", ws1.id, "Core", "Preset spread");
-    const growth = makeBook("book-growth", ws1.id, "Growth Tilt", "More QQQ");
-    const recovery = makeBook("book-recovery", ws2.id, "Recovery", "Second workspace");
+  it("renders collection groups, adds a collection, and edits collection bankroll", async () => {
+    const workspace = makeWorkspace("ws-1", "March 23, 2020", "2020-03-23", 2, 2);
+    const core = makeBook("book-1", workspace.id, "collection-1", "Collection 1", "Core");
+    const challenger = makeBook("book-2", workspace.id, "collection-2", "Collection 2", "Challenger");
+    const view = makeWorkspaceView(workspace, [
+      makeCollection("collection-1", workspace.id, "Collection 1", 10000, [core]),
+      makeCollection("collection-2", workspace.id, "Collection 2", 10000, [challenger]),
+    ]);
 
-    const { fetchMock } = installFetchMock({
-      workspaces: [ws1, ws2],
-      booksByWorkspace: {
-        [ws1.id]: [core, growth],
-        [ws2.id]: [recovery],
-      },
-      comparisonsByWorkspace: {
-        [ws1.id]: makeComparison(ws1.id, ws1.start_date, [
-          { date: "1998-02-18", benchmark: 10000, values: { [core.id]: 10000, [growth.id]: 10000 } },
-          { date: "1998-02-19", benchmark: 10125, values: { [core.id]: 10200, [growth.id]: 10350 } },
-        ]),
-        [ws2.id]: makeComparison(ws2.id, ws2.start_date, [
-          { date: "2009-03-09", benchmark: 10000, values: { [recovery.id]: 10000 } },
-          { date: "2009-03-10", benchmark: 10320, values: { [recovery.id]: 10440 } },
-        ]),
-      },
-      snapshotsByBook: {
-        [core.id]: {
-          "1998-02-18": makeSnapshot(core, "1998-02-18", "VTI", 10000),
-          "1998-02-19": makeSnapshot(core, "1998-02-19", "VTI", 10200),
-        },
-        [growth.id]: {
-          "1998-02-18": makeSnapshot(growth, "1998-02-18", "QQQ", 10000),
-          "1998-02-19": makeSnapshot(growth, "1998-02-19", "QQQ", 10350),
-        },
-        [recovery.id]: {
-          "2009-03-09": makeSnapshot(recovery, "2009-03-09", "VTI", 10000),
-          "2009-03-10": makeSnapshot(recovery, "2009-03-10", "VTI", 10440),
-        },
-      },
-    });
-
-    renderApp();
-
-    await screen.findByRole("heading", { name: /Create Workspace/i });
-    fireEvent.click(await screen.findByRole("button", { name: /Workspace Browser/i }));
-    await clickWorkspaceCard("Tech Bubble");
-
-    expect(matchingCalls(fetchMock, (url, method) => method === "GET" && url.pathname === `/api/v1/workspaces/${ws1.id}/view`)).toHaveLength(1);
-    expect(matchingCalls(fetchMock, (url, method) => method === "GET" && url.pathname === `/api/v1/workspaces/${ws1.id}/books`)).toHaveLength(0);
-    expect(matchingCalls(fetchMock, (url, method) => method === "GET" && url.pathname === `/api/v1/workspaces/${ws1.id}/comparison`)).toHaveLength(0);
-
-    expect(await screen.findByRole("heading", { name: "Tech Bubble" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Select Core/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Select Growth Tilt/i })).toBeInTheDocument();
-    expect(screen.getAllByText("SPY").length).toBeGreaterThan(0);
-
-    fireEvent.click(screen.getByRole("button", { name: /Back to Browser/i }));
-    fireEvent.click(screen.getByRole("button", { name: /Recovery Desk/i }));
-
-    expect(await screen.findByText(/Build the books for this age\./i)).toBeInTheDocument();
-    expect(screen.getAllByRole("heading", { name: "Recovery Desk" }).length).toBeGreaterThan(0);
-    await waitFor(() => {
-      expect(screen.queryByRole("button", { name: /Growth Tilt/i })).not.toBeInTheDocument();
-    });
-  });
-
-  it("creates a custom basket book from market search", async () => {
-    const workspace = makeWorkspace("ws-1", "Custom Test", "1998-02-18", 0);
-    const createdBook = makeBook("book-aapl", workspace.id, "Tech Tilt", "Custom basket");
-    const { state, fetchMock } = installFetchMock({
+    renderApp({
+      appSettings: appSettingsPayload(),
+      bootstrap: bootstrapPayload(),
+      comparisonRequests: [],
+      settingsPatches: [],
+      snapshotRequests: [],
+      viewByWorkspaceId: { [workspace.id]: view },
       workspaces: [workspace],
-      booksByWorkspace: { [workspace.id]: [] },
-      searchResults: {
-        AAPL: [
-          {
-            ticker: "AAPL",
-            name: "Apple Inc.",
-            asset_type: "stock",
-            exchange: "NASDAQ",
-          },
-        ],
-      },
-      createBook: () => createdBook,
-      resolveComparison: (workspaceId, mockState) => {
-        const books = mockState.booksByWorkspace[workspaceId] ?? [];
-        if (!books.length) {
-          return makeComparison(workspaceId, workspace.start_date, []);
-        }
-        return makeComparison(workspaceId, workspace.start_date, [
-          { date: "1998-02-18", benchmark: 10000, values: { [createdBook.id]: 10000 } },
-          { date: "1998-02-19", benchmark: 10110, values: { [createdBook.id]: 10240 } },
-        ]);
-      },
-      resolveSnapshot: (bookId, asOf) => makeSnapshot(createdBook, asOf, "AAPL", asOf === "1998-02-18" ? 10000 : 10240),
     });
 
-    renderApp();
+    await openWorkspace("March 23, 2020");
 
-    await screen.findByRole("heading", { name: /Create Workspace/i });
-    fireEvent.click(await screen.findByRole("button", { name: /Workspace Browser/i }));
-    await clickWorkspaceCard("Custom Test");
+    expect(await screen.findByText("Collection 1")).toBeInTheDocument();
+    expect(screen.getByText("Collection 2")).toBeInTheDocument();
 
-    expect(await screen.findByRole("heading", { name: "Custom Test" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /Add Book/i }));
+    const promptMock = vi.spyOn(window, "prompt");
+    promptMock.mockReturnValueOnce("25000");
+    fireEvent.click(screen.getAllByRole("button", { name: /bankroll/i })[0]);
 
-    fireEvent.click(screen.getByRole("button", { name: /Custom Basket/i }));
-    fireEvent.change(screen.getByLabelText(/Search stock or ETF/i), { target: { value: "A" } });
-    fireEvent.change(screen.getByLabelText(/Search stock or ETF/i), { target: { value: "AA" } });
-    fireEvent.change(screen.getByLabelText(/Search stock or ETF/i), { target: { value: "AAP" } });
-    fireEvent.change(screen.getByLabelText(/Search stock or ETF/i), { target: { value: "AAPL" } });
+    await screen.findByText("$25,000");
 
-    await act(async () => {
-      await new Promise((resolve) => window.setTimeout(resolve, 300));
-    });
+    fireEvent.click(screen.getByRole("button", { name: /add collection/i }));
 
-    expect(matchingCalls(fetchMock, (url, method) => method === "GET" && url.pathname === "/api/v1/market/search")).toHaveLength(1);
-    fireEvent.click(await screen.findByRole("button", { name: /AAPL/i }));
-    fireEvent.change(screen.getByLabelText(/Book Name/i), { target: { value: "Tech Tilt" } });
-    fireEvent.change(screen.getByLabelText(/AAPL weight/i), { target: { value: "55" } });
-    fireEvent.click(screen.getByRole("button", { name: /Create Book/i }));
-
-    expect(await screen.findByRole("button", { name: /Select Tech Tilt/i })).toBeInTheDocument();
-    expect(matchingCalls(fetchMock, (url, method) => method === "POST" && url.pathname === `/api/v1/workspaces/${workspace.id}/books`)).toHaveLength(1);
-    expect(matchingCalls(fetchMock, (url, method) => method === "GET" && url.pathname === `/api/v1/workspaces/${workspace.id}/view`)).toHaveLength(1);
-    expect(state.createdBookPayloads[0]).toEqual({
-      workspaceId: workspace.id,
-      payload: {
-        name: "Tech Tilt",
-        description: "Broad market first, growth second, with ballast.",
-        strategy_kind: "custom",
-        preset_id: null,
-        allocations: [{ ticker: "AAPL", asset_type: "stock", weight: 55 }],
-        snapshot_as_of: "1998-02-18",
-      },
-    });
+    expect(await screen.findByText("Collection 3")).toBeInTheDocument();
   });
 
-  it("keeps the run paused until play and fetches snapshots only during the run phase", async () => {
-    const workspace = makeWorkspace("ws-1", "Replay Desk", "1998-02-18", 1);
-    const book = makeBook("book-core", workspace.id, "Core", "Preset spread");
+  it("opens on the browser when saved workspaces exist and can jump into create flow", async () => {
+    const workspace = makeWorkspace("ws-1", "March 23, 2020", "2020-03-23", 0, 1);
+    const view = makeWorkspaceView(workspace, [makeCollection("collection-1", workspace.id, "Collection 1", 10000, [])]);
 
-    const { fetchMock } = installFetchMock({
+    renderApp({
+      appSettings: appSettingsPayload(),
+      bootstrap: bootstrapPayload(),
+      comparisonRequests: [],
+      settingsPatches: [],
+      snapshotRequests: [],
+      viewByWorkspaceId: { [workspace.id]: view },
       workspaces: [workspace],
-      booksByWorkspace: { [workspace.id]: [book] },
-      comparisonsByWorkspace: {
-        [workspace.id]: makeComparison(workspace.id, workspace.start_date, [
-          { date: "1998-02-18", benchmark: 10000, values: { [book.id]: 10000 } },
-          { date: "1998-02-19", benchmark: 10080, values: { [book.id]: 10220 } },
-          { date: "1998-02-20", benchmark: 10140, values: { [book.id]: 10410 } },
-        ]),
-      },
-      resolveSnapshot: (bookId, asOf) => {
-        const values: Record<string, number> = {
-          "1998-02-18": 10000,
-          "1998-02-19": 10220,
-          "1998-02-20": 10410,
-        };
-        return makeSnapshot(book, asOf, "VTI", values[asOf]);
-      },
     });
 
-    renderApp();
+    expect(await screen.findByText("Open Workspace")).toBeInTheDocument();
 
-    await screen.findByRole("heading", { name: /Create Workspace/i });
-    fireEvent.click(await screen.findByRole("button", { name: /Workspace Browser/i }));
-    await clickWorkspaceCard("Replay Desk");
+    fireEvent.click(screen.getByRole("button", { name: /create workspace/i }));
 
-    expect(await screen.findByRole("heading", { name: "Replay Desk" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /^Play$/i })).not.toBeInTheDocument();
-    expect(matchingCalls(fetchMock, (url, method) => method === "GET" && url.pathname === `/api/v1/books/${book.id}/snapshot`)).toHaveLength(0);
+    expect(await screen.findByRole("heading", { name: "Create Workspace" })).toBeInTheDocument();
+  });
 
-    fireEvent.click(screen.getByRole("button", { name: /Run Simulation/i }));
-    expect(await screen.findByRole("button", { name: /^Play$/i })).toBeInTheDocument();
+  it("deletes a workspace from the browser row action", async () => {
+    const workspaceA = makeWorkspace("ws-1", "March 23, 2020", "2020-03-23", 0, 1);
+    const workspaceB = makeWorkspace("ws-2", "March 09, 2009", "2009-03-09", 0, 1);
+    const viewA = makeWorkspaceView(workspaceA, [makeCollection("collection-1", workspaceA.id, "Collection 1", 10000, [])]);
+    const viewB = makeWorkspaceView(workspaceB, [makeCollection("collection-2", workspaceB.id, "Collection 1", 10000, [])]);
 
-    await waitFor(() => {
-      expect(screen.getAllByText("February 18, 1998").length).toBeGreaterThan(0);
-    });
-    expect(matchingCalls(fetchMock, (url, method) => method === "GET" && url.pathname === `/api/v1/books/${book.id}/snapshot`)).toHaveLength(1);
-
-    await act(async () => {
-      await new Promise((resolve) => window.setTimeout(resolve, 240));
-    });
-
-    expect(screen.queryByText("February 19, 1998")).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: /^Play$/i }));
-
-    await act(async () => {
-      await new Promise((resolve) => window.setTimeout(resolve, 240));
+    renderApp({
+      appSettings: appSettingsPayload(),
+      bootstrap: bootstrapPayload(),
+      comparisonRequests: [],
+      settingsPatches: [],
+      snapshotRequests: [],
+      viewByWorkspaceId: { [workspaceA.id]: viewA, [workspaceB.id]: viewB },
+      workspaces: [workspaceA, workspaceB],
     });
 
-    await waitFor(() => {
-      expect(screen.getAllByText("February 19, 1998").length).toBeGreaterThan(0);
-    });
-    expect(matchingCalls(fetchMock, (url, method) => method === "GET" && url.pathname === `/api/v1/books/${book.id}/snapshot`)).toHaveLength(1);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
 
-    fireEvent.change(screen.getByLabelText(/Comparison timeline/i), { target: { value: "2" } });
-    await act(async () => {
-      await new Promise((resolve) => window.setTimeout(resolve, 200));
-    });
+    expect(await screen.findByText("March 23, 2020")).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("button", { name: /delete workspace/i })[0]);
 
-    expect(await screen.findByRole("button", { name: /^Play$/i })).toBeInTheDocument();
-    await waitFor(() => {
-      expect(screen.getAllByText("February 20, 1998").length).toBeGreaterThan(0);
-    });
-    expect(matchingCalls(fetchMock, (url, method) => method === "GET" && url.pathname === `/api/v1/books/${book.id}/snapshot`)).toHaveLength(2);
+    await waitFor(() => expect(screen.queryByText("March 23, 2020")).not.toBeInTheDocument());
+    expect(screen.getByText("March 09, 2009")).toBeInTheDocument();
+  });
 
-    fireEvent.click(screen.getByRole("button", { name: /^Reset$/i }));
-    await waitFor(() => {
-      expect(screen.getAllByText("February 18, 1998").length).toBeGreaterThan(0);
-    });
+  it("enters run mode from the top bar and refetches comparison and snapshots with overlay choices", async () => {
+    const workspace = makeWorkspace("ws-1", "March 23, 2020", "2020-03-23", 2, 2);
+    const core = makeBook("book-1", workspace.id, "collection-1", "Collection 1", "Core");
+    const challenger = makeBook("book-2", workspace.id, "collection-2", "Collection 2", "Challenger");
+    const view = makeWorkspaceView(workspace, [
+      makeCollection("collection-1", workspace.id, "Collection 1", 10000, [core]),
+      makeCollection("collection-2", workspace.id, "Collection 2", 10000, [challenger]),
+    ]);
+    const state: MockState = {
+      appSettings: appSettingsPayload(),
+      bootstrap: bootstrapPayload(),
+      comparisonRequests: [],
+      settingsPatches: [],
+      snapshotRequests: [],
+      viewByWorkspaceId: { [workspace.id]: view },
+      workspaces: [workspace],
+    };
 
-    fireEvent.click(screen.getByRole("button", { name: /Books/i }));
-    expect(await screen.findByText(/Build the books for this age\./i)).toBeInTheDocument();
+    renderApp(state);
+    await openWorkspace("March 23, 2020");
+
+    fireEvent.click(await screen.findByRole("button", { name: /^run$/i }));
+
+    await screen.findByText("Shared replay");
+    await waitFor(() => expect(state.comparisonRequests.length).toBeGreaterThan(0));
+    expect(state.comparisonRequests[state.comparisonRequests.length - 1]?.payload.benchmark_tickers).toEqual(["SPY"]);
+
+    fireEvent.click(await screen.findByRole("button", { name: "QQQ" }));
+    await waitFor(() =>
+      expect(state.comparisonRequests[state.comparisonRequests.length - 1]?.payload.benchmark_tickers).toEqual(
+        expect.arrayContaining(["SPY", "QQQ"]),
+      ),
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "QQQ" }));
+    await waitFor(() =>
+      expect(state.snapshotRequests.some((url) => new URL(url).searchParams.get("benchmark_ticker") === "QQQ")).toBe(true),
+    );
+
+    expect(screen.getByRole("button", { name: /back to setup/i })).toBeInTheDocument();
+  });
+
+  it("opens and saves the runtime settings modal", async () => {
+    const workspace = makeWorkspace("ws-1", "March 23, 2020", "2020-03-23", 0, 1);
+    const view = makeWorkspaceView(workspace, [makeCollection("collection-1", workspace.id, "Collection 1", 10000, [])]);
+    const state: MockState = {
+      appSettings: appSettingsPayload(),
+      bootstrap: bootstrapPayload(),
+      comparisonRequests: [],
+      settingsPatches: [],
+      snapshotRequests: [],
+      viewByWorkspaceId: { [workspace.id]: view },
+      workspaces: [workspace],
+    };
+
+    renderApp(state);
+
+    const settingsButton = await screen.findByRole("button", { name: /settings/i });
+    await waitFor(() => expect(settingsButton).not.toBeDisabled());
+    fireEvent.click(settingsButton);
+
+    expect(await screen.findByText(/Tune the runtime defaults/i)).toBeInTheDocument();
+
+    const benchmarkInput = screen.getByDisplayValue("SPY");
+    fireEvent.change(benchmarkInput, { target: { value: "QQQ" } });
+    fireEvent.click(screen.getByRole("button", { name: /save settings/i }));
+
+    await waitFor(() => expect(state.settingsPatches).toHaveLength(1));
+    expect(state.settingsPatches[0]).toMatchObject({
+      market: expect.objectContaining({ benchmark_ticker: "QQQ" }),
+    });
   });
 });

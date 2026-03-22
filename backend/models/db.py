@@ -41,6 +41,11 @@ class Workspace(Base):
         cascade="all, delete-orphan",
         order_by="WorkspaceBenchmark.created_at",
     )
+    collections: Mapped[list["BookCollection"]] = relationship(
+        back_populates="workspace",
+        cascade="all, delete-orphan",
+        order_by="BookCollection.created_at",
+    )
     portfolios: Mapped[list["Portfolio"]] = relationship(
         back_populates="workspace",
         cascade="all, delete-orphan",
@@ -61,11 +66,29 @@ class WorkspaceBenchmark(Base):
     workspace: Mapped[Workspace] = relationship(back_populates="benchmarks")
 
 
+class BookCollection(Base):
+    __tablename__ = "book_collections"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    initial_cash: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False, default=Decimal("10000"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+    workspace: Mapped[Workspace] = relationship(back_populates="collections")
+    portfolios: Mapped[list["Portfolio"]] = relationship(
+        back_populates="collection",
+        cascade="all, delete-orphan",
+        order_by="Portfolio.created_at",
+    )
+
+
 class Portfolio(Base):
     __tablename__ = "portfolios"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    collection_id: Mapped[str | None] = mapped_column(ForeignKey("book_collections.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     description: Mapped[str] = mapped_column(Text, default="", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
@@ -85,6 +108,7 @@ class Portfolio(Base):
         order_by="Position.entry_date",
     )
     workspace: Mapped[Workspace] = relationship(back_populates="portfolios")
+    collection: Mapped[BookCollection | None] = relationship(back_populates="portfolios")
 
 
 class BookAllocation(Base):

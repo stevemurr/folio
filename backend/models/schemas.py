@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ApiModel(BaseModel):
@@ -16,19 +16,29 @@ class ApiError(ApiModel):
     message: str
 
 
+RunStateStatus = Literal["draft", "ready", "blocked"]
+BookStrategyKind = Literal["preset", "custom"]
+
+
+class RunStateIssue(ApiModel):
+    code: str
+    message: str
+    ticker: str | None = None
+    first_tradable_date: date | None = None
+
+
+class RunState(ApiModel):
+    status: RunStateStatus
+    opening_session: date | None = None
+    issues: list[RunStateIssue] = Field(default_factory=list)
+
+
 class WorkspaceCreate(ApiModel):
     start_date: date
 
 
-class WorkspaceBenchmark(ApiModel):
-    ticker: str
-    is_primary: bool
-
-
 class WorkspaceUpdate(ApiModel):
-    initial_cash: Decimal | None = Field(default=None, gt=0)
-    benchmark_tickers: list[str] | None = None
-    primary_benchmark_ticker: str | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=120)
 
 
 class WorkspaceSummary(ApiModel):
@@ -37,6 +47,8 @@ class WorkspaceSummary(ApiModel):
     start_date: date
     created_at: datetime
     book_count: int
+    collection_count: int
+    run_state: RunState
 
 
 class WorkspaceDetail(ApiModel):
@@ -45,8 +57,28 @@ class WorkspaceDetail(ApiModel):
     start_date: date
     created_at: datetime
     book_count: int
+    collection_count: int
+    run_state: RunState
+
+
+class CollectionCreate(ApiModel):
+    name: str | None = Field(default=None, max_length=120)
+    initial_cash: Decimal = Field(gt=0)
+
+
+class CollectionUpdate(ApiModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    initial_cash: Decimal | None = Field(default=None, gt=0)
+
+
+class CollectionSummary(ApiModel):
+    id: str
+    workspace_id: str
+    name: str
+    created_at: datetime
     initial_cash: float
-    benchmarks: list[WorkspaceBenchmark]
+    book_count: int
+    run_state: RunState
 
 
 class BookAllocationCreate(ApiModel):
@@ -59,9 +91,6 @@ class BookAllocationPreview(ApiModel):
     ticker: str
     asset_type: Literal["stock", "etf"]
     weight: float
-
-
-BookStrategyKind = Literal["preset", "custom"]
 
 
 class BookCreate(ApiModel):
@@ -84,16 +113,21 @@ class BookUpdate(ApiModel):
 class BookConfig(ApiModel):
     id: str
     workspace_id: str
+    collection_id: str | None = None
+    collection_name: str | None = None
     name: str
     description: str
     strategy_kind: BookStrategyKind
     preset_id: str | None = None
     allocations: list[BookAllocationCreate]
+    run_state: RunState
 
 
 class BookSummary(ApiModel):
     id: str
     workspace_id: str
+    collection_id: str | None = None
+    collection_name: str | None = None
     name: str
     description: str
     created_at: datetime
@@ -105,6 +139,11 @@ class BookSummary(ApiModel):
     preset_id: str | None = None
     allocation_preview: list[BookAllocationPreview]
     cash_weight: float
+    run_state: RunState
+
+
+class CollectionDetail(CollectionSummary):
+    books: list[BookSummary]
 
 
 class BookMetrics(ApiModel):
@@ -179,6 +218,8 @@ class AllocationSlice(ApiModel):
 class BookSnapshot(ApiModel):
     id: str
     workspace_id: str
+    collection_id: str | None = None
+    collection_name: str | None = None
     name: str
     description: str
     created_at: datetime
@@ -188,6 +229,16 @@ class BookSnapshot(ApiModel):
     metrics: BookMetrics
     positions: list[PositionWithMetrics]
     allocation: list[AllocationSlice]
+
+
+class WorkspaceComparisonBenchmarkSeries(ApiModel):
+    key: str
+    ticker: str
+    label: str
+    collection_id: str | None = None
+    collection_name: str | None = None
+    is_primary: bool
+    initial_cash: float
 
 
 class WorkspaceComparisonPoint(ApiModel):
@@ -200,29 +251,76 @@ class WorkspaceComparison(ApiModel):
     workspace_id: str
     primary_benchmark_ticker: str
     benchmark_tickers: list[str]
+    benchmark_series: list[WorkspaceComparisonBenchmarkSeries] = Field(default_factory=list)
     start_date: date
     end_date: date
     points: list[WorkspaceComparisonPoint]
 
 
+class WorkspaceComparisonRequest(ApiModel):
+    benchmark_tickers: list[str] = Field(default_factory=list)
+    primary_benchmark_ticker: str | None = None
+
+
 class WorkspaceView(ApiModel):
     workspace: WorkspaceDetail
-    books: list[BookSummary]
-    comparison: WorkspaceComparison
+    collections: list[CollectionDetail]
 
 
-class BookCreateResult(ApiModel):
-    book: BookSummary
-    workspace_view: WorkspaceView
-    snapshot: BookSnapshot
+class WorkspaceAvailabilityRequest(ApiModel):
+    tickers: list[str] = Field(default_factory=list)
+
+
+class WorkspaceTickerAvailability(ApiModel):
+    ticker: str
+    available: bool
+    first_tradable_date: date | None = None
+
+
+class WorkspaceAvailabilityResponse(ApiModel):
+    workspace_id: str
+    opening_session: date | None = None
+    issues: list[RunStateIssue] = Field(default_factory=list)
+    tickers: list[WorkspaceTickerAvailability]
 
 
 PortfolioAllocationCreate = BookAllocationCreate
-PortfolioCreate = BookCreate
-PortfolioSummary = BookSummary
+
+
+class PortfolioCreate(ApiModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str = ""
+    initial_cash: Decimal = Field(gt=0)
+    start_date: date | None = None
+    allocations: list[PortfolioAllocationCreate] | None = None
+
+
+class PortfolioSummary(ApiModel):
+    id: str
+    name: str
+    description: str
+    created_at: datetime
+    base_currency: str
+    initial_cash: float
+    open_positions: int
+    total_positions: int
+
+
 PortfolioMetrics = BookMetrics
 TimeSeriesPoint = BookTimeSeriesPoint
 PortfolioDetail = BookSnapshot
+
+
+class AnalyzeRequest(ApiModel):
+    portfolio_id: str
+
+
+class ChatHistoryEntry(ApiModel):
+    id: str
+    portfolio_id: str
+    role: Literal["user", "assistant"]
+    content: str
+    created_at: datetime
 
 
 class MarketSearchResult(ApiModel):
@@ -299,13 +397,18 @@ class AppSettingsRealEstate(ApiModel):
     search_limit: int
 
 
+class AppSettingsCapabilities(ApiModel):
+    agent: bool
+    real_estate: bool
+
+
 class AppSettings(ApiModel):
     database: AppSettingsDatabase
     market: AppSettingsMarket
     agent: AppSettingsAgent
     scheduler: AppSettingsScheduler
     real_estate: AppSettingsRealEstate
-    capabilities: dict[str, bool]
+    capabilities: AppSettingsCapabilities
 
 
 class AppSettingsMarketUpdate(ApiModel):
@@ -341,31 +444,3 @@ class AppSettingsUpdate(ApiModel):
     agent: AppSettingsAgentUpdate | None = None
     scheduler: AppSettingsSchedulerUpdate | None = None
     real_estate: AppSettingsRealEstateUpdate | None = None
-
-
-class AnalyzeRequest(ApiModel):
-    portfolio_id: str
-
-
-class AnalyzeResponse(ApiModel):
-    detail: ApiError
-
-
-class ChatHistoryEntry(ApiModel):
-    id: str
-    portfolio_id: str
-    role: Literal["user", "assistant"]
-    content: str
-    created_at: datetime
-
-
-def decimal_to_float(value: Decimal | None) -> float | None:
-    return float(value) if value is not None else None
-
-
-class DecimalFriendlyModel(ApiModel):
-    @field_serializer("*", when_used="json", check_fields=False)
-    def serialize(self, value: Any) -> Any:
-        if isinstance(value, Decimal):
-            return float(value)
-        return value

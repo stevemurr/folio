@@ -5,10 +5,11 @@ from sqlalchemy.orm import Session
 
 from backend.database import get_db
 from backend.models.schemas import (
-    BookCreate,
-    BookCreateResult,
     BookSummary,
+    WorkspaceAvailabilityRequest,
+    WorkspaceAvailabilityResponse,
     WorkspaceComparison,
+    WorkspaceComparisonRequest,
     WorkspaceCreate,
     WorkspaceDetail,
     WorkspaceSummary,
@@ -25,8 +26,8 @@ def list_workspaces(db: Session = Depends(get_db)) -> list[WorkspaceSummary]:
     return WorkspaceService(db).list_workspaces()
 
 
-@router.post("/workspaces", response_model=WorkspaceView, status_code=status.HTTP_201_CREATED)
-def create_workspace(payload: WorkspaceCreate, db: Session = Depends(get_db)) -> WorkspaceView:
+@router.post("/workspaces", response_model=WorkspaceDetail, status_code=status.HTTP_201_CREATED)
+def create_workspace(payload: WorkspaceCreate, db: Session = Depends(get_db)) -> WorkspaceDetail:
     return WorkspaceService(db).create_workspace(payload)
 
 
@@ -40,8 +41,8 @@ def get_workspace_view(workspace_id: str, db: Session = Depends(get_db)) -> Work
     return WorkspaceService(db).build_workspace_view(workspace_id)
 
 
-@router.patch("/workspaces/{workspace_id}", response_model=WorkspaceView)
-def update_workspace(payload: WorkspaceUpdate, workspace_id: str, db: Session = Depends(get_db)) -> WorkspaceView:
+@router.patch("/workspaces/{workspace_id}", response_model=WorkspaceDetail)
+def update_workspace(payload: WorkspaceUpdate, workspace_id: str, db: Session = Depends(get_db)) -> WorkspaceDetail:
     return WorkspaceService(db).update_workspace(workspace_id, payload)
 
 
@@ -56,11 +57,19 @@ def list_books(workspace_id: str, db: Session = Depends(get_db)) -> list[BookSum
     return WorkspaceService(db).list_books(workspace_id)
 
 
-@router.post("/workspaces/{workspace_id}/books", response_model=BookCreateResult, status_code=status.HTTP_201_CREATED)
-def create_book(workspace_id: str, payload: BookCreate, db: Session = Depends(get_db)) -> BookCreateResult:
-    return WorkspaceService(db).create_book(workspace_id, payload)
+@router.post("/workspaces/{workspace_id}/comparison", response_model=WorkspaceComparison)
+def get_workspace_comparison(
+    workspace_id: str,
+    payload: WorkspaceComparisonRequest,
+    db: Session = Depends(get_db),
+) -> WorkspaceComparison:
+    return WorkspaceService(db).build_comparison(workspace_id, payload)
 
 
-@router.get("/workspaces/{workspace_id}/comparison", response_model=WorkspaceComparison)
-def get_workspace_comparison(workspace_id: str, db: Session = Depends(get_db)) -> WorkspaceComparison:
-    return WorkspaceService(db).build_comparison(workspace_id)
+@router.post("/workspaces/{workspace_id}/availability", response_model=WorkspaceAvailabilityResponse)
+def get_workspace_availability(
+    workspace_id: str,
+    payload: WorkspaceAvailabilityRequest,
+    db: Session = Depends(get_db),
+) -> WorkspaceAvailabilityResponse:
+    return WorkspaceService(db).build_workspace_availability(workspace_id, payload.tickers)

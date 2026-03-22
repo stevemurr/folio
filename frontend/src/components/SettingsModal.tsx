@@ -1,5 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { ChangeEvent, useEffect, useState } from "react";
+import { X } from "lucide-react";
 
 import { ApiClientError, AppSettings, api } from "../api/client";
 import ModalShell from "./ui/modal-shell";
@@ -159,20 +160,25 @@ export default function SettingsModal({ open, settings, onClose }: Props) {
 
   return (
     <ModalShell contentClassName="max-w-4xl" open={open}>
-      <Card className="flex max-h-[calc(100vh-2rem)] w-full flex-col overflow-hidden">
+      <Card className="surface-panel flex max-h-[calc(100vh-2rem)] w-full flex-col overflow-hidden border-border/80 shadow-panel">
         <CardHeader className="flex flex-row items-start justify-between gap-4 border-b border-border/60 pb-5">
-          <div className="space-y-2">
-            <CardTitle>Runtime Settings</CardTitle>
-            <CardDescription>
+          <div className="space-y-3">
+            <div className="inline-flex items-center rounded-[12px] border border-primary/20 bg-primary/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] text-primary">
+              Runtime Settings
+            </div>
+            <div className="space-y-2">
+              <CardTitle className="text-2xl leading-tight sm:text-3xl">Tune the runtime defaults.</CardTitle>
+              <CardDescription className="max-w-2xl text-sm leading-6 text-muted-foreground">
               These values are stored in the database via <code>app_config</code> and override the file config.
-            </CardDescription>
+              </CardDescription>
+            </div>
           </div>
-            <Button onClick={onClose} type="button" variant="ghost">
-              Close
-            </Button>
+          <Button aria-label="Close settings" onClick={onClose} size="icon" type="button" variant="ghost">
+            <X className="h-4 w-4" />
+          </Button>
           </CardHeader>
         <CardContent className="grid min-h-0 gap-6 overflow-y-auto pt-6">
-          <div className="grid gap-4 rounded-[28px] border border-border/70 bg-background/70 p-5 sm:grid-cols-3">
+          <div className="surface-panel-muted grid gap-4 rounded-[24px] border border-border/70 p-5 sm:grid-cols-3">
             <div>
               <div className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">Database</div>
               <div className="mt-2 text-sm">{settings.database.engine}</div>
@@ -183,7 +189,7 @@ export default function SettingsModal({ open, settings, onClose }: Props) {
             </div>
           </div>
 
-          <section className="grid gap-4 rounded-[28px] border border-border/70 bg-background/70 p-5">
+          <section className="surface-panel-muted grid gap-4 rounded-[24px] border border-border/70 p-5">
             <div>
               <h3 className="text-xl">Market</h3>
               <p className="text-sm text-muted-foreground">Benchmark and cache behavior for portfolio analytics.</p>
@@ -212,7 +218,7 @@ export default function SettingsModal({ open, settings, onClose }: Props) {
             </div>
           </section>
 
-          <section className="grid gap-4 rounded-[28px] border border-border/70 bg-background/70 p-5">
+          <section className="surface-panel-muted grid gap-4 rounded-[24px] border border-border/70 p-5">
             <div>
               <h3 className="text-xl">Agent</h3>
               <p className="text-sm text-muted-foreground">OpenAI-compatible endpoint and completion defaults.</p>
@@ -249,7 +255,7 @@ export default function SettingsModal({ open, settings, onClose }: Props) {
             </div>
           </section>
 
-          <section className="grid gap-4 rounded-[28px] border border-border/70 bg-background/70 p-5">
+          <section className="surface-panel-muted grid gap-4 rounded-[24px] border border-border/70 p-5">
             <div>
               <h3 className="text-xl">Scheduler</h3>
               <p className="text-sm text-muted-foreground">Cron strings are applied immediately after save.</p>
@@ -273,7 +279,7 @@ export default function SettingsModal({ open, settings, onClose }: Props) {
             </div>
           </section>
 
-          <section className="grid gap-4 rounded-[28px] border border-border/70 bg-background/70 p-5">
+          <section className="surface-panel-muted grid gap-4 rounded-[24px] border border-border/70 p-5">
             <div>
               <h3 className="text-xl">Real Estate</h3>
               <p className="text-sm text-muted-foreground">Zillow CSV sources for metro and ZIP-level simulated assets.</p>
@@ -316,7 +322,7 @@ export default function SettingsModal({ open, settings, onClose }: Props) {
             </p>
           ) : null}
         </CardContent>
-        <CardFooter className="justify-end border-t border-border/60 pt-4">
+        <CardFooter className="sticky bottom-0 justify-end border-t border-border/60 bg-card/95 pt-4 backdrop-blur-sm">
           <Button onClick={onClose} type="button" variant="secondary">
             Cancel
           </Button>

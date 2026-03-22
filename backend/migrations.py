@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from sqlalchemy import Connection, Engine, select
+from sqlalchemy import Connection, Engine, inspect, select
 
 from backend.models.db import (
     Base,
+    BookCollection,
     BookAllocation,
     ChatHistory,
     Portfolio,
@@ -67,6 +69,44 @@ def _upgrade_workspace_strategy_model(connection: Connection) -> None:
     ChatHistory.__table__.create(bind=connection, checkfirst=True)
 
 
+def _upgrade_collections_first_workspace_flow(connection: Connection) -> None:
+    BookCollection.__table__.create(bind=connection, checkfirst=True)
+
+    inspector = inspect(connection)
+    portfolio_columns = {column["name"] for column in inspector.get_columns("portfolios")}
+    if "collection_id" not in portfolio_columns:
+        connection.exec_driver_sql("ALTER TABLE portfolios ADD COLUMN collection_id VARCHAR")
+    connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_portfolios_collection_id ON portfolios (collection_id)")
+
+    workspace_rows = connection.execute(
+        select(Workspace.id, Workspace.initial_cash).select_from(Workspace.__table__)
+    ).all()
+    for workspace_id, initial_cash in workspace_rows:
+        existing_collection_id = connection.execute(
+            select(BookCollection.id)
+            .where(BookCollection.workspace_id == workspace_id)
+            .order_by(BookCollection.created_at.asc())
+        ).scalar_one_or_none()
+        if existing_collection_id is None:
+            existing_collection_id = str(uuid.uuid4())
+            connection.execute(
+                BookCollection.__table__.insert().values(
+                    id=existing_collection_id,
+                    workspace_id=workspace_id,
+                    name="Collection 1",
+                    initial_cash=initial_cash,
+                    created_at=now_utc(),
+                )
+            )
+
+        connection.execute(
+            Portfolio.__table__.update()
+            .where(Portfolio.workspace_id == workspace_id)
+            .where(Portfolio.collection_id.is_(None))
+            .values(collection_id=existing_collection_id)
+        )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration("0001_initial", "Create Folio core tables.", _upgrade_initial),
     Migration("0002_real_estate_markets", "Create Zillow real-estate catalog table.", _upgrade_real_estate_markets),
@@ -79,6 +119,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         "0004_workspace_strategy_model",
         "Reset saved state for workspace bankroll, benchmark overlays, and editable book strategies.",
         _upgrade_workspace_strategy_model,
+    ),
+    Migration(
+        "0005_collections_first_workspace_flow",
+        "Add book collections and backfill one collection per workspace.",
+        _upgrade_collections_first_workspace_flow,
     ),
 )
 

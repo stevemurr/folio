@@ -1,4 +1,4 @@
-import { ArrowLeft, ArrowRight, Clock3, Settings2 } from "lucide-react";
+import { ArrowLeft, ArrowRight, Settings2, Trash2 } from "lucide-react";
 
 import { WorkspaceSummary } from "../api/client";
 import { cn } from "../lib/utils";
@@ -7,8 +7,10 @@ import { Button } from "./ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";
 
 type Props = {
+  deletingWorkspaceId?: string | null;
   loading?: boolean;
   onCreateWorkspace: () => void;
+  onDeleteWorkspace?: (workspaceId: string) => void;
   onOpenSettings?: () => void;
   onPickWorkspace: (workspaceId: string) => void;
   onReturnToWorkspace?: () => void;
@@ -17,28 +19,84 @@ type Props = {
   workspaces: WorkspaceSummary[];
 };
 
-function formatLongDate(value: string | null | undefined) {
-  if (!value) {
-    return "n/a";
+function workspaceSummary(workspace: WorkspaceSummary) {
+  const bookLabel = `${workspace.book_count} ${workspace.book_count === 1 ? "book" : "books"}`;
+  const cohortLabel = `${workspace.collection_count} ${workspace.collection_count === 1 ? "cohort" : "cohorts"}`;
+
+  if (workspace.run_state.status === "blocked") {
+    return `${bookLabel} across ${cohortLabel}. Repair blocked books before replay.`;
   }
-  return new Intl.DateTimeFormat("en-US", {
-    month: "long",
-    day: "numeric",
-    year: "numeric",
-  }).format(new Date(`${value}T00:00:00`));
+  return workspace.book_count
+    ? `${bookLabel} across ${cohortLabel}.`
+    : `No books yet. Start building this cohort set.`;
 }
 
-function formatCreatedAt(value: string) {
-  return new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  }).format(new Date(value));
+function parseDate(value: string) {
+  return new Date(`${value}T00:00:00`);
+}
+
+function seasonLabel(value: string) {
+  const date = parseDate(value);
+  const month = date.getMonth();
+  const year = date.getFullYear();
+
+  if (month <= 1 || month === 11) {
+    return `Winter ${year}`;
+  }
+  if (month <= 4) {
+    return `Spring ${year}`;
+  }
+  if (month <= 7) {
+    return `Summer ${year}`;
+  }
+  return `Fall ${year}`;
+}
+
+function workspaceYear(value: string) {
+  return parseDate(value).getFullYear();
+}
+
+function dateTone(value: string) {
+  const date = parseDate(value);
+  const palettes = [
+    {
+      card: "border-sky-500/18 bg-sky-500/[0.045] hover:bg-sky-500/[0.075]",
+      pill: "border-sky-500/20 bg-sky-500/10 text-sky-700",
+      year: "text-sky-700/12",
+    },
+    {
+      card: "border-amber-500/18 bg-amber-500/[0.045] hover:bg-amber-500/[0.075]",
+      pill: "border-amber-500/22 bg-amber-500/10 text-amber-700",
+      year: "text-amber-700/12",
+    },
+    {
+      card: "border-rose-500/18 bg-rose-500/[0.045] hover:bg-rose-500/[0.075]",
+      pill: "border-rose-500/22 bg-rose-500/10 text-rose-700",
+      year: "text-rose-700/12",
+    },
+    {
+      card: "border-teal-500/18 bg-teal-500/[0.045] hover:bg-teal-500/[0.075]",
+      pill: "border-teal-500/22 bg-teal-500/10 text-teal-700",
+      year: "text-teal-700/12",
+    },
+  ];
+  return palettes[(date.getFullYear() + date.getMonth()) % palettes.length];
+}
+
+function cardTone(workspace: WorkspaceSummary, active: boolean) {
+  const tone = dateTone(workspace.start_date);
+  return cn(
+    "relative overflow-hidden",
+    tone.card,
+    active ? "shadow-[0_0_0_1px_rgba(93,215,224,0.2)]" : "",
+  );
 }
 
 export default function WorkspaceBrowser({
+  deletingWorkspaceId = null,
   loading = false,
   onCreateWorkspace,
+  onDeleteWorkspace,
   onOpenSettings,
   onPickWorkspace,
   onReturnToWorkspace,
@@ -102,49 +160,68 @@ export default function WorkspaceBrowser({
           <div className="grid gap-3">
             {workspaces.map((workspace) => {
               const active = workspace.id === selectedWorkspaceId;
+              const deleting = deletingWorkspaceId === workspace.id;
+              const tone = dateTone(workspace.start_date);
               return (
-                <button
-                  className={cn(
-                    "rounded-[20px] border px-5 py-5 text-left transition-all",
-                    active
-                      ? "border-secondary/30 bg-secondary/12 shadow-[0_0_0_1px_rgba(93,215,224,0.15)]"
-                      : "border-border/70 bg-card/60 hover:bg-card/85",
-                  )}
+                <div
+                  className={cn("rounded-[22px] border px-5 py-5 transition-all", cardTone(workspace, active))}
                   key={workspace.id}
-                  onClick={() => onPickWorkspace(workspace.id)}
-                  type="button"
                 >
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="space-y-2">
-                      <strong className="block text-xl text-foreground">{workspace.name}</strong>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Badge variant="outline">{formatLongDate(workspace.start_date)}</Badge>
-                        <Badge variant="outline">
-                          {workspace.book_count} {workspace.book_count === 1 ? "book" : "books"}
-                        </Badge>
+                  <div className="flex items-center gap-2">
+                    <button
+                      className="group min-w-0 flex-1 text-left"
+                      disabled={deleting}
+                      onClick={() => onPickWorkspace(workspace.id)}
+                      type="button"
+                    >
+                      <div className="flex items-center justify-between gap-4">
+                        <div className="min-w-0 space-y-3">
+                          <div className="flex flex-wrap items-center gap-3">
+                            <Badge variant="outline">
+                              {workspace.collection_count} {workspace.collection_count === 1 ? "cohort" : "cohorts"}
+                            </Badge>
+                            <Badge className={tone.pill} variant="outline">
+                              {seasonLabel(workspace.start_date)}
+                            </Badge>
+                          </div>
+                          <div className="space-y-1.5">
+                            <strong className="block font-display text-[2rem] leading-none tracking-tight text-foreground sm:text-[2.35rem]">
+                              {workspace.name}
+                            </strong>
+                            <p className="max-w-3xl text-sm leading-6 text-muted-foreground">
+                              {workspaceSummary(workspace)}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="hidden items-center gap-4 lg:flex">
+                          <span className={cn("font-display text-6xl leading-none tracking-tight", tone.year)}>
+                            {workspaceYear(workspace.start_date)}
+                          </span>
+                          <ArrowRight className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-1" />
+                        </div>
+                        <ArrowRight className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-1 lg:hidden" />
                       </div>
-                    </div>
-                    <ArrowRight className="mt-1 h-4 w-4 text-muted-foreground" />
-                  </div>
+                    </button>
 
-                  <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                    <div className="surface-panel-soft rounded-[16px] border border-border/70 px-4 py-3">
-                      <span className="block text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-                        Start Date
-                      </span>
-                      <span className="mt-2 block text-sm text-foreground">{formatLongDate(workspace.start_date)}</span>
-                    </div>
-                    <div className="surface-panel-soft rounded-[16px] border border-border/70 px-4 py-3">
-                      <span className="block text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-                        Created
-                      </span>
-                      <span className="mt-2 inline-flex items-center gap-2 text-sm text-foreground">
-                        <Clock3 className="h-3.5 w-3.5 text-muted-foreground" />
-                        {formatCreatedAt(workspace.created_at)}
-                      </span>
-                    </div>
+                    {onDeleteWorkspace ? (
+                      <Button
+                        aria-label="Delete workspace"
+                        className="shrink-0 self-center"
+                        disabled={deleting}
+                        onClick={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          onDeleteWorkspace(workspace.id);
+                        }}
+                        size="icon"
+                        type="button"
+                        variant="ghost"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    ) : null}
                   </div>
-                </button>
+                </div>
               );
             })}
           </div>

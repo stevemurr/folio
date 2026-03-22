@@ -1,14 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import {
-  ApiClientError,
-  BookCreateRequest,
-  WorkspaceSummary,
-  WorkspaceUpdateRequest,
-  WorkspaceView,
-  api,
-} from "./api/client";
+import { ApiClientError, BookCreateRequest, WorkspaceSummary, api } from "./api/client";
 import AgentSidebar from "./components/AgentSidebar";
 import BookSnapshotPanel from "./components/BookSnapshotPanel";
 import CreateBookModal from "./components/CreateBookModal";
@@ -20,7 +13,14 @@ import WorkspaceComparisonChart from "./components/WorkspaceComparisonChart";
 import WorkspaceHero from "./components/WorkspaceHero";
 import WorkspaceTopBar from "./components/WorkspaceTopBar";
 import { Card, CardContent } from "./components/ui/card";
-import { useAppSettings, useBookSnapshot, useBootstrap, useWorkspaceView, useWorkspaces } from "./hooks/usePortfolio";
+import {
+  useAppSettings,
+  useBookSnapshot,
+  useBootstrap,
+  useWorkspaceComparison,
+  useWorkspaceView,
+  useWorkspaces,
+} from "./hooks/usePortfolio";
 import { defaultGuidedRunDate } from "./lib/guidedRun";
 
 type PlaybackRate = 0.5 | 1 | 2 | 4;
@@ -61,58 +61,17 @@ function nextPlaybackIndex(path: number[], currentIndex: number): number | null 
   return null;
 }
 
-function workspaceSummaryFromView(view: WorkspaceView): WorkspaceSummary {
-  return {
-    id: view.workspace.id,
-    name: view.workspace.name,
-    start_date: view.workspace.start_date,
-    created_at: view.workspace.created_at,
-    book_count: view.books.length,
-  };
-}
-
-function removeBookFromWorkspaceView(view: WorkspaceView, bookId: string): WorkspaceView {
-  const books = view.books.filter((book) => book.id !== bookId);
-  const benchmarkTickers = view.comparison.benchmark_tickers;
-  if (!books.length) {
-    return {
-      ...view,
-      workspace: { ...view.workspace, book_count: 0 },
-      books: [],
-      comparison: {
-        ...view.comparison,
-        start_date: view.workspace.start_date,
-        end_date: view.workspace.start_date,
-        points: [],
-        benchmark_tickers: benchmarkTickers,
-      },
-    };
-  }
-
-  return {
-    ...view,
-    workspace: { ...view.workspace, book_count: books.length },
-    books,
-    comparison: {
-      ...view.comparison,
-      points: view.comparison.points.map((point) => ({
-        ...point,
-        book_values: Object.fromEntries(Object.entries(point.book_values).filter(([key]) => key !== bookId)),
-      })),
-    },
-  };
-}
-
 export default function App() {
   const queryClient = useQueryClient();
   const bootstrapQuery = useBootstrap();
   const settingsQuery = useAppSettings();
   const workspacesQuery = useWorkspaces();
 
-  const [screen, setScreen] = useState<WorkspaceScreen>("create");
+  const [screen, setScreen] = useState<WorkspaceScreen>("browser");
   const [workspacePhase, setWorkspacePhase] = useState<WorkspacePhase>("books");
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(null);
   const [selectedBookId, setSelectedBookId] = useState<string | null>(null);
+  const [activeCollectionId, setActiveCollectionId] = useState<string | null>(null);
   const [workspaceStartDate, setWorkspaceStartDate] = useState(defaultGuidedRunDate());
   const [workspaceError, setWorkspaceError] = useState<string | null>(null);
   const [bookError, setBookError] = useState<string | null>(null);
@@ -125,22 +84,47 @@ export default function App() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackRate, setPlaybackRate] = useState<PlaybackRate>(1);
   const [requestedSnapshotDate, setRequestedSnapshotDate] = useState<string | null>(null);
+  const [overlayTickers, setOverlayTickers] = useState<string[]>([]);
+  const [primaryOverlayTicker, setPrimaryOverlayTicker] = useState<string | null>(null);
 
   const workspaceViewQuery = useWorkspaceView(selectedWorkspaceId);
   const workspaceView = workspaceViewQuery.data ?? null;
   const selectedWorkspace = workspaceView?.workspace ?? null;
-  const books = workspaceView?.books ?? [];
-  const comparison = workspaceView?.comparison ?? null;
-  const comparisonPoints = comparison?.points ?? [];
-  const clampedDateIndex = comparisonPoints.length ? Math.min(selectedDateIndex, comparisonPoints.length - 1) : 0;
-  const selectedDate = comparisonPoints[clampedDateIndex]?.date ?? selectedWorkspace?.start_date ?? null;
-  const selectedBook = useMemo(
-    () => books.find((book) => book.id === selectedBookId) ?? null,
-    [books, selectedBookId],
+  const collections = workspaceView?.collections ?? [];
+  const books = useMemo(() => collections.flatMap((collection) => collection.books), [collections]);
+  const readyCollections = useMemo(
+    () => collections.filter((collection) => collection.run_state.status === "ready"),
+    [collections],
   );
-  const snapshotQuery = useBookSnapshot(selectedBookId, requestedSnapshotDate);
+  const runnableBooks = useMemo(
+    () => readyCollections.flatMap((collection) => collection.books.filter((book) => book.run_state.status === "ready")),
+    [readyCollections],
+  );
+  const workspaceRunState = selectedWorkspace?.run_state ?? null;
+  const comparisonQuery = useWorkspaceComparison(
+    selectedWorkspaceId,
+    overlayTickers,
+    primaryOverlayTicker,
+    workspacePhase === "run" && workspaceRunState?.status === "ready",
+  );
+  const comparison = comparisonQuery.data ?? null;
+  const comparisonPoints = comparison?.points ?? [];
+  const activeBooks = workspacePhase === "run" ? runnableBooks : books;
+  const clampedDateIndex = comparisonPoints.length ? Math.min(selectedDateIndex, comparisonPoints.length - 1) : 0;
+  const selectedDate =
+    comparisonPoints[clampedDateIndex]?.date ??
+    selectedWorkspace?.run_state.opening_session ??
+    selectedWorkspace?.start_date ??
+    null;
+  const selectedBook = useMemo(
+    () => activeBooks.find((book) => book.id === selectedBookId) ?? books.find((book) => book.id === selectedBookId) ?? null,
+    [activeBooks, books, selectedBookId],
+  );
+  const snapshotQuery = useBookSnapshot(selectedBookId, requestedSnapshotDate, primaryOverlayTicker);
   const playbackPath = useMemo(() => buildPlaybackPath(comparisonPoints.length), [comparisonPoints.length]);
   const agentConfigured = Boolean(bootstrapQuery.data?.capabilities.agent);
+  const readyCollectionCount = readyCollections.length;
+  const blockedCollectionCount = collections.filter((collection) => collection.run_state.status === "blocked").length;
 
   const bookConfigQuery = useQuery({
     queryKey: ["book-config", editingBookId],
@@ -153,6 +137,18 @@ export default function App() {
     setSelectedDateIndex(0);
     setIsPlaying(false);
     setRequestedSnapshotDate(null);
+  }
+
+  function invalidateWorkspaceQueries(workspaceId: string | null) {
+    if (!workspaceId) {
+      return Promise.resolve();
+    }
+    return Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["workspaces"] }),
+      queryClient.invalidateQueries({ queryKey: ["workspace-view", workspaceId] }),
+      queryClient.invalidateQueries({ queryKey: ["workspace-comparison", workspaceId] }),
+      queryClient.invalidateQueries({ queryKey: ["book-snapshot"] }),
+    ]);
   }
 
   function openWorkspaceCreate() {
@@ -168,15 +164,17 @@ export default function App() {
   function selectWorkspace(workspaceId: string) {
     setSelectedWorkspaceId(workspaceId);
     setSelectedBookId(null);
+    setActiveCollectionId(null);
     setWorkspacePhase("books");
     resetPlayback();
     setScreen("workspace");
   }
 
-  function openCreateBookModal() {
+  function openCreateBookModal(collectionId: string) {
     setBookError(null);
     setBookModalMode("create");
     setEditingBookId(null);
+    setActiveCollectionId(collectionId);
     setShowBookModal(true);
   }
 
@@ -184,6 +182,7 @@ export default function App() {
     setBookError(null);
     setBookModalMode("edit");
     setEditingBookId(bookId);
+    setActiveCollectionId(null);
     setShowBookModal(true);
   }
 
@@ -192,10 +191,11 @@ export default function App() {
     setBookError(null);
     setBookModalMode("create");
     setEditingBookId(null);
+    setActiveCollectionId(null);
   }
 
   function enterRunPhase() {
-    if (!books.length) {
+    if (workspaceRunState?.status !== "ready") {
       return;
     }
     setWorkspacePhase("run");
@@ -239,113 +239,139 @@ export default function App() {
     if (!selectedWorkspaceId) {
       return;
     }
-    if (!window.confirm("Delete this workspace and all of its books?")) {
+    requestWorkspaceDeletion(selectedWorkspaceId);
+  }
+
+  function requestWorkspaceDeletion(workspaceId: string) {
+    if (!window.confirm("Delete this workspace, its collections, and every book inside them?")) {
       return;
     }
-    deleteWorkspaceMutation.mutate();
+    deleteWorkspaceMutation.mutate(workspaceId);
+  }
+
+  function deleteCollection(collectionId: string) {
+    const collection = collections.find((item) => item.id === collectionId);
+    if (!collection) {
+      return;
+    }
+    if (!window.confirm(`Delete ${collection.name} and all of its books?`)) {
+      return;
+    }
+    deleteCollectionMutation.mutate(collectionId);
   }
 
   function deleteBook(bookId: string) {
-    if (!window.confirm("Delete this book from the workspace?")) {
+    if (!window.confirm("Delete this book from the collection?")) {
       return;
     }
     deleteBookMutation.mutate(bookId);
   }
 
-  function applyWorkspaceViewUpdate(updated: WorkspaceView) {
-    queryClient.setQueryData(["workspace-view", updated.workspace.id], updated);
-    queryClient.setQueryData<WorkspaceSummary[]>(["workspaces"], (current) => {
-      const next = current ?? [];
-      const summary = workspaceSummaryFromView(updated);
-      return [...next.filter((workspaceItem) => workspaceItem.id !== summary.id), summary];
-    });
+  function addCollection() {
+    const seedCash = collections[0]?.initial_cash ?? 10000;
+    createCollectionMutation.mutate({ initial_cash: seedCash });
   }
 
-  function applyBookMutationSuccess(created: { book: { id: string }; workspace_view: WorkspaceView; snapshot: { as_of: string } }) {
-    setBookError(null);
-    closeBookModal();
-    setSelectedBookId(created.book.id);
-    setWorkspacePhase("books");
-    resetPlayback();
-    applyWorkspaceViewUpdate(created.workspace_view);
-    queryClient.setQueryData(["book-snapshot", created.book.id, created.snapshot.as_of], created.snapshot);
-    setScreen("workspace");
-  }
-
-  function updateWorkspace(payload: WorkspaceUpdateRequest) {
-    if (!selectedWorkspaceId) {
+  function renameCollection(collectionId: string, currentName: string) {
+    const nextName = window.prompt("Collection name", currentName)?.trim();
+    if (!nextName || nextName === currentName) {
       return;
     }
-    updateWorkspaceMutation.mutate(payload);
+    updateCollectionMutation.mutate({ collectionId, payload: { name: nextName } });
   }
 
-  function addBenchmark(ticker: string) {
-    if (!selectedWorkspace) {
+  function editCollectionBankroll(collectionId: string, currentCash: number) {
+    const raw = window.prompt("Collection bankroll", String(Math.round(currentCash)))?.trim();
+    if (!raw) {
       return;
     }
+    const parsed = Number(raw.replace(/[^0-9.]/g, ""));
+    if (!Number.isFinite(parsed) || parsed <= 0 || parsed === currentCash) {
+      return;
+    }
+    updateCollectionMutation.mutate({ collectionId, payload: { initial_cash: parsed } });
+  }
+
+  function addOverlayTicker(ticker: string) {
     const normalized = ticker.trim().toUpperCase();
-    if (!normalized || selectedWorkspace.benchmarks.some((item) => item.ticker === normalized)) {
+    if (!normalized) {
       return;
     }
-    updateWorkspace({
-      benchmark_tickers: [...selectedWorkspace.benchmarks.map((item) => item.ticker), normalized],
-      primary_benchmark_ticker: selectedWorkspace.benchmarks.find((item) => item.is_primary)?.ticker ?? normalized,
+    setOverlayTickers((current) => (current.includes(normalized) ? current : [...current, normalized]));
+    setPrimaryOverlayTicker((current) => current ?? normalized);
+  }
+
+  function removeOverlayTicker(ticker: string) {
+    setOverlayTickers((current) => {
+      if (current.length <= 1) {
+        return current;
+      }
+      const next = current.filter((item) => item !== ticker);
+      setPrimaryOverlayTicker((currentPrimary) => (currentPrimary === ticker ? next[0] ?? null : currentPrimary));
+      return next;
     });
   }
 
-  function removeBenchmark(ticker: string) {
-    if (!selectedWorkspace) {
+  function setPrimaryOverlay(ticker: string) {
+    if (!overlayTickers.includes(ticker)) {
       return;
     }
-    const nextTickers = selectedWorkspace.benchmarks.map((item) => item.ticker).filter((item) => item !== ticker);
-    if (!nextTickers.length) {
-      return;
-    }
-    const currentPrimary = selectedWorkspace.benchmarks.find((item) => item.is_primary)?.ticker;
-    updateWorkspace({
-      benchmark_tickers: nextTickers,
-      primary_benchmark_ticker: currentPrimary === ticker ? nextTickers[0] : currentPrimary,
-    });
-  }
-
-  function setPrimaryBenchmark(ticker: string) {
-    updateWorkspace({ primary_benchmark_ticker: ticker });
+    setPrimaryOverlayTicker(ticker);
   }
 
   useEffect(() => {
+    if (workspacesQuery.isLoading) {
+      return;
+    }
+
     const workspaceList = workspacesQuery.data ?? [];
     if (!workspaceList.length) {
-      if (selectedWorkspaceId) {
-        setSelectedWorkspaceId(null);
-        setSelectedBookId(null);
-        setWorkspacePhase("books");
-        resetPlayback();
+      if (!selectedWorkspaceId) {
+        setScreen("create");
       }
-      setScreen("create");
       return;
     }
 
     if (selectedWorkspaceId && !workspaceList.some((workspaceItem) => workspaceItem.id === selectedWorkspaceId)) {
       setSelectedWorkspaceId(null);
       setSelectedBookId(null);
+      setActiveCollectionId(null);
       setWorkspacePhase("books");
       resetPlayback();
       setScreen("browser");
     }
-  }, [selectedWorkspaceId, workspacesQuery.data]);
+  }, [selectedWorkspaceId, workspacesQuery.data, workspacesQuery.isLoading]);
 
   useEffect(() => {
-    if (!books.length) {
+    const defaultTicker = bootstrapQuery.data?.benchmark_ticker ?? "SPY";
+    if (!selectedWorkspaceId) {
+      setOverlayTickers([]);
+      setPrimaryOverlayTicker(null);
+      return;
+    }
+    setOverlayTickers([defaultTicker]);
+    setPrimaryOverlayTicker(defaultTicker);
+  }, [bootstrapQuery.data?.benchmark_ticker, selectedWorkspaceId]);
+
+  useEffect(() => {
+    if (!activeBooks.length) {
       setSelectedBookId(null);
       if (workspacePhase === "run") {
         setWorkspacePhase("books");
       }
       return;
     }
-    if (!selectedBookId || !books.some((book) => book.id === selectedBookId)) {
-      setSelectedBookId(books[0].id);
+    if (!selectedBookId || !activeBooks.some((book) => book.id === selectedBookId)) {
+      setSelectedBookId(activeBooks[0].id);
     }
-  }, [books, selectedBookId, workspacePhase]);
+  }, [activeBooks, selectedBookId, workspacePhase]);
+
+  useEffect(() => {
+    if (workspacePhase === "run" && workspaceRunState?.status !== "ready") {
+      setWorkspacePhase("books");
+      resetPlayback();
+    }
+  }, [workspacePhase, workspaceRunState?.status]);
 
   useEffect(() => {
     if (!comparisonPoints.length) {
@@ -393,40 +419,79 @@ export default function App() {
 
   const createWorkspaceMutation = useMutation({
     mutationFn: () => api.createWorkspace({ start_date: workspaceStartDate }),
-    onSuccess: (created) => {
+    onSuccess: async (created) => {
       setWorkspaceError(null);
       setWorkspaceStartDate(defaultGuidedRunDate());
-      applyWorkspaceViewUpdate(created);
-      selectWorkspace(created.workspace.id);
+      setSelectedWorkspaceId(created.id);
+      setSelectedBookId(null);
+      setActiveCollectionId(null);
+      setWorkspacePhase("books");
+      resetPlayback();
+      setScreen("workspace");
+      await invalidateWorkspaceQueries(created.id);
     },
     onError: (error) => {
       setWorkspaceError(errorMessage(error, "Unable to create workspace."));
     },
   });
 
-  const updateWorkspaceMutation = useMutation({
-    mutationFn: (payload: WorkspaceUpdateRequest) => api.updateWorkspace(selectedWorkspaceId!, payload),
-    onSuccess: (updated) => {
+  const createCollectionMutation = useMutation({
+    mutationFn: (payload: { initial_cash: number }) => api.createCollection(selectedWorkspaceId!, payload),
+    onSuccess: async () => {
       setWorkspaceError(null);
-      resetPlayback();
-      applyWorkspaceViewUpdate(updated);
+      await invalidateWorkspaceQueries(selectedWorkspaceId);
     },
     onError: (error) => {
-      setWorkspaceError(errorMessage(error, "Unable to update workspace."));
+      setWorkspaceError(errorMessage(error, "Unable to create collection."));
+    },
+  });
+
+  const updateCollectionMutation = useMutation({
+    mutationFn: ({ collectionId, payload }: { collectionId: string; payload: { name?: string; initial_cash?: number } }) =>
+      api.updateCollection(collectionId, payload),
+    onSuccess: async () => {
+      setWorkspaceError(null);
+      setWorkspacePhase("books");
+      resetPlayback();
+      await invalidateWorkspaceQueries(selectedWorkspaceId);
+    },
+    onError: (error) => {
+      setWorkspaceError(errorMessage(error, "Unable to update collection."));
+    },
+  });
+
+  const deleteCollectionMutation = useMutation({
+    mutationFn: (collectionId: string) => api.deleteCollection(collectionId),
+    onSuccess: async (_, collectionId) => {
+      setWorkspacePhase("books");
+      resetPlayback();
+      setShowAgentDrawer(false);
+      if (selectedBook && selectedBook.collection_id === collectionId) {
+        setSelectedBookId(null);
+      }
+      await invalidateWorkspaceQueries(selectedWorkspaceId);
+    },
+    onError: (error) => {
+      setWorkspaceError(errorMessage(error, "Unable to delete collection."));
     },
   });
 
   const createBookMutation = useMutation({
     mutationFn: (payload: BookCreateRequest) => {
-      if (!selectedWorkspaceId || !selectedWorkspace) {
-        throw new Error("Select a workspace first.");
+      if (!activeCollectionId) {
+        throw new Error("Select a collection first.");
       }
-      return api.createBook(selectedWorkspaceId, {
-        ...payload,
-        snapshot_as_of: selectedWorkspace.start_date,
-      });
+      return api.createBook(activeCollectionId, payload);
     },
-    onSuccess: applyBookMutationSuccess,
+    onSuccess: async (created) => {
+      setBookError(null);
+      closeBookModal();
+      setSelectedBookId(created.id);
+      setWorkspacePhase("books");
+      resetPlayback();
+      setScreen("workspace");
+      await invalidateWorkspaceQueries(selectedWorkspaceId);
+    },
     onError: (error) => {
       setBookError(errorMessage(error, "Unable to create book."));
     },
@@ -439,53 +504,65 @@ export default function App() {
       }
       return api.updateBook(editingBookId, payload);
     },
-    onSuccess: applyBookMutationSuccess,
+    onSuccess: async (updated) => {
+      setBookError(null);
+      closeBookModal();
+      setSelectedBookId(updated.id);
+      setWorkspacePhase("books");
+      resetPlayback();
+      setScreen("workspace");
+      await Promise.all([
+        invalidateWorkspaceQueries(selectedWorkspaceId),
+        queryClient.invalidateQueries({ queryKey: ["book-config", updated.id] }),
+        queryClient.removeQueries({ queryKey: ["book-snapshot", updated.id] }),
+      ]);
+    },
     onError: (error) => {
       setBookError(errorMessage(error, "Unable to update book."));
     },
   });
 
   const deleteWorkspaceMutation = useMutation({
-    mutationFn: () => api.deleteWorkspace(selectedWorkspaceId!),
-    onSuccess: () => {
-      const deletedWorkspaceId = selectedWorkspaceId;
-      const currentWorkspaces = queryClient.getQueryData<WorkspaceSummary[]>(["workspaces"]) ?? [];
-      const remainingWorkspaces = deletedWorkspaceId
-        ? currentWorkspaces.filter((workspaceItem) => workspaceItem.id !== deletedWorkspaceId)
-        : currentWorkspaces;
+    mutationFn: (workspaceId: string) => api.deleteWorkspace(workspaceId),
+    onSuccess: async (_, deletedWorkspaceId) => {
+      const deletedSelectedWorkspace = selectedWorkspaceId === deletedWorkspaceId;
+      setWorkspaceError(null);
 
-      setSelectedWorkspaceId(null);
-      setSelectedBookId(null);
-      setWorkspacePhase("books");
-      resetPlayback();
-      setShowAgentDrawer(false);
-      setScreen(remainingWorkspaces.length ? "browser" : "create");
+      queryClient.setQueryData<WorkspaceSummary[]>(["workspaces"], (current) =>
+        (current ?? []).filter((workspace) => workspace.id !== deletedWorkspaceId),
+      );
 
-      if (deletedWorkspaceId) {
-        queryClient.setQueryData(["workspaces"], remainingWorkspaces);
-        queryClient.removeQueries({ queryKey: ["workspace-view", deletedWorkspaceId] });
+      if (deletedSelectedWorkspace) {
+        setSelectedWorkspaceId(null);
+        setSelectedBookId(null);
+        setActiveCollectionId(null);
+        setWorkspacePhase("books");
+        resetPlayback();
+        setShowAgentDrawer(false);
+        setScreen("browser");
+        queryClient.removeQueries({ queryKey: ["book-snapshot"] });
       }
-      queryClient.removeQueries({ queryKey: ["book-snapshot"] });
+
+      queryClient.removeQueries({ queryKey: ["workspace-view", deletedWorkspaceId] });
+      queryClient.removeQueries({ queryKey: ["workspace-comparison", deletedWorkspaceId] });
+      await queryClient.refetchQueries({ queryKey: ["workspaces"], type: "active" });
+    },
+    onError: (error) => {
+      setWorkspaceError(errorMessage(error, "Unable to delete workspace."));
     },
   });
 
   const deleteBookMutation = useMutation({
     mutationFn: (bookId: string) => api.deleteBook(bookId),
-    onSuccess: (_, deletedBookId) => {
+    onSuccess: async (_, deletedBookId) => {
       setWorkspacePhase("books");
       resetPlayback();
       setShowAgentDrawer(false);
       if (selectedBookId === deletedBookId) {
         setSelectedBookId(null);
       }
-      if (selectedWorkspaceId) {
-        const currentView = queryClient.getQueryData<WorkspaceView>(["workspace-view", selectedWorkspaceId]);
-        if (currentView) {
-          const updatedView = removeBookFromWorkspaceView(currentView, deletedBookId);
-          applyWorkspaceViewUpdate(updatedView);
-        }
-      }
       queryClient.removeQueries({ queryKey: ["book-snapshot", deletedBookId] });
+      await invalidateWorkspaceQueries(selectedWorkspaceId);
     },
   });
 
@@ -493,7 +570,21 @@ export default function App() {
     bootstrapQuery.isLoading ||
     settingsQuery.isLoading ||
     workspacesQuery.isLoading ||
-    (selectedWorkspaceId ? workspaceViewQuery.isLoading : false);
+    (selectedWorkspaceId ? workspaceViewQuery.isLoading : false) ||
+    (workspacePhase === "run" && selectedWorkspaceId ? comparisonQuery.isLoading : false);
+
+  const createCollectionPending = createCollectionMutation.isPending;
+  const deletingWorkspaceId = deleteWorkspaceMutation.isPending ? (deleteWorkspaceMutation.variables ?? null) : null;
+  const collectionActionPendingId =
+    deleteCollectionMutation.isPending
+      ? (deleteCollectionMutation.variables ?? null)
+      : updateCollectionMutation.isPending
+        ? (updateCollectionMutation.variables?.collectionId ?? null)
+        : null;
+  const bookModalCollectionName =
+    bookModalMode === "create"
+      ? collections.find((collection) => collection.id === activeCollectionId)?.name ?? null
+      : bookConfigQuery.data?.collection_name ?? null;
 
   return (
     <>
@@ -521,9 +612,16 @@ export default function App() {
           ) : screen === "browser" ? (
             <div className="grid min-h-screen content-start gap-6 py-4 lg:py-10">
               <div className="mx-auto grid w-full max-w-[1120px] gap-6">
+                {workspaceError ? (
+                  <Card className="border-destructive/20 bg-destructive/10">
+                    <CardContent className="px-6 py-4 text-sm text-destructive">{workspaceError}</CardContent>
+                  </Card>
+                ) : null}
                 <WorkspaceBrowser
+                  deletingWorkspaceId={deletingWorkspaceId}
                   loading={workspacesQuery.isLoading}
                   onCreateWorkspace={openWorkspaceCreate}
+                  onDeleteWorkspace={requestWorkspaceDeletion}
                   onOpenSettings={() => setShowSettingsModal(true)}
                   onPickWorkspace={selectWorkspace}
                   onReturnToWorkspace={selectedWorkspaceId ? () => setScreen("workspace") : undefined}
@@ -543,19 +641,14 @@ export default function App() {
                     onDeleteWorkspace={deleteSelectedWorkspace}
                     onOpenAnalysis={() => setShowAgentDrawer(true)}
                     onOpenSettings={() => setShowSettingsModal(true)}
+                    onReturnToBooks={returnToBooksPhase}
+                    phase={workspacePhase}
                     settingsDisabled={settingsQuery.isLoading || settingsQuery.isError}
                   />
 
                   <WorkspaceHero
-                    booksCount={books.length}
-                    onAddBenchmark={addBenchmark}
-                    onReturnToBooks={returnToBooksPhase}
-                    onRunSimulation={enterRunPhase}
-                    onSaveBankroll={(nextValue) => updateWorkspace({ initial_cash: nextValue })}
-                    onSetPrimaryBenchmark={setPrimaryBenchmark}
-                    onRemoveBenchmark={removeBenchmark}
-                    pendingWorkspaceUpdate={updateWorkspaceMutation.isPending}
-                    phase={workspacePhase}
+                    blockedCollectionCount={blockedCollectionCount}
+                    readyCollectionCount={readyCollectionCount}
                     workspace={selectedWorkspace}
                   />
                 </>
@@ -573,41 +666,57 @@ export default function App() {
                     <p>Loading workspace data...</p>
                   </CardContent>
                 </Card>
-              ) : workspaceViewQuery.isError ? (
+              ) : workspaceViewQuery.isError || (workspacePhase === "run" && comparisonQuery.isError) ? (
                 <Card className="surface-panel border-border/80">
                   <CardContent className="grid min-h-[320px] place-items-center px-6 py-8 text-center">
                     <div className="max-w-lg">
                       <p className="text-lg font-semibold">Unable to load this workspace.</p>
                       <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                        Refresh the page or create a new workspace to continue.
+                        {workspacePhase === "run" && comparisonQuery.isError
+                          ? errorMessage(comparisonQuery.error, "The comparison data could not be loaded.")
+                          : "Refresh the page or create a new workspace to continue."}
                       </p>
                     </div>
                   </CardContent>
                 </Card>
               ) : workspacePhase === "books" ? (
                 <WorkspaceBooksPhase
-                  books={books}
+                  collectionActionPendingId={collectionActionPendingId}
+                  collections={collections}
+                  createCollectionPending={createCollectionPending}
                   deletePendingBookId={deleteBookMutation.isPending ? (deleteBookMutation.variables ?? null) : null}
                   onAddBook={openCreateBookModal}
+                  onAddCollection={addCollection}
                   onDeleteBook={deleteBook}
+                  onDeleteCollection={deleteCollection}
                   onEditBook={openEditBookModal}
+                  onEditCollectionBankroll={editCollectionBankroll}
+                  onEnterRunPhase={enterRunPhase}
+                  onRenameCollection={renameCollection}
                   onSelectBook={selectBook}
+                  readyCollectionCount={readyCollectionCount}
+                  runDisabled={workspaceRunState?.status !== "ready"}
                   selectedBookId={selectedBookId}
+                  workspaceIssue={workspaceRunState?.issues[0]?.message ?? null}
+                  workspaceStatus={workspaceRunState?.status ?? "draft"}
                 />
               ) : (
                 <>
                   <WorkspaceComparisonChart
-                    benchmarks={selectedWorkspace?.benchmarks ?? []}
-                    books={books}
+                    books={runnableBooks}
                     comparison={comparison}
-                    initialCash={selectedWorkspace?.initial_cash ?? 10000}
                     isPlaying={isPlaying}
+                    onAddOverlayTicker={addOverlayTicker}
                     onPlaybackRateChange={setPlaybackRate}
                     onPlayPause={togglePlayback}
+                    onRemoveOverlayTicker={removeOverlayTicker}
                     onReset={resetPlayback}
                     onSelectBook={selectBook}
                     onSelectDateIndex={selectDateIndex}
+                    onSetPrimaryOverlay={setPrimaryOverlay}
+                    overlayTickers={overlayTickers}
                     playbackRate={playbackRate}
+                    primaryBenchmarkTicker={primaryOverlayTicker}
                     selectedBookId={selectedBookId}
                     selectedDateIndex={clampedDateIndex}
                   />
@@ -626,6 +735,7 @@ export default function App() {
       </div>
 
       <CreateBookModal
+        collectionName={bookModalCollectionName}
         config={bookModalMode === "edit" ? bookConfigQuery.data ?? null : null}
         error={bookError}
         loadingConfig={bookModalMode === "edit" && bookConfigQuery.isLoading}
@@ -640,6 +750,7 @@ export default function App() {
         }}
         open={showBookModal}
         pending={createBookMutation.isPending || updateBookMutation.isPending}
+        workspaceId={selectedWorkspaceId}
       />
 
       <AgentSidebar

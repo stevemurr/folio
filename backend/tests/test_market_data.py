@@ -78,6 +78,36 @@ def test_market_data_rejects_invalid_ticker(db_session, monkeypatch: pytest.Monk
     assert error.value.code == "invalid_ticker"
 
 
+def test_resolve_first_prices_handles_duplicate_price_columns(db_session, monkeypatch: pytest.MonkeyPatch):
+    index = pd.to_datetime(["2024-01-02", "2024-01-03"])
+    columns = pd.MultiIndex.from_tuples(
+        [
+            ("raw", "Adj Close"),
+            ("derived", "Adj Close"),
+            ("raw", "Close"),
+            ("raw", "Open"),
+            ("raw", "High"),
+            ("raw", "Low"),
+            ("raw", "Volume"),
+        ]
+    )
+    payload = pd.DataFrame(
+        [
+            [100.0, None, 100.0, 99.0, 101.0, 98.0, 1000],
+            [101.0, None, 101.0, 100.0, 102.0, 99.0, 1100],
+        ],
+        index=index,
+        columns=columns,
+    )
+
+    monkeypatch.setattr("backend.services.market_data.yf.download", lambda *args, **kwargs: payload)
+    resolved = MarketDataService(db_session).resolve_first_prices_on_or_after(["SPY"], date(2024, 1, 2))
+
+    assert resolved["SPY"] is not None
+    assert resolved["SPY"].date == date(2024, 1, 2)
+    assert resolved["SPY"].close == pytest.approx(100.0)
+
+
 def test_resolve_prices_on_or_after_batches_lookup(db_session, monkeypatch: pytest.MonkeyPatch):
     add_price_history(
         db_session,

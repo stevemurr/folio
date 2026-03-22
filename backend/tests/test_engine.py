@@ -99,11 +99,11 @@ def test_portfolio_analysis_reconstructs_values_and_allocation(db_session):
     assert analysis.metrics.total_value > 1_000
     assert analysis.metrics.current_cash == pytest.approx(800)
     assert analysis.metrics.sharpe_ratio is not None
-    assert len(analysis.timeseries) == 40
+    assert len(analysis.timeseries) == len(asset_series)
     assert analysis.timeseries[-1].book_value == pytest.approx(analysis.metrics.total_value)
     assert analysis.allocation[0].ticker == "CASH"
     open_position = next(item for item in analysis.positions if item.ticker == "AAPL")
-    assert open_position.current_price == pytest.approx(178)
+    assert open_position.current_price == pytest.approx(asset_series[-1][1])
     assert open_position.weight > 0
 
 

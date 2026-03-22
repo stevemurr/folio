@@ -48,16 +48,25 @@ class PortfolioEngine:
         *,
         as_of: date | None = None,
         start_date: date | None = None,
+        benchmark_ticker: str | None = None,
     ) -> BookSnapshot:
         portfolio = self.get_portfolio(portfolio_id)
         effective_start_date = start_date or self._default_start_date(portfolio, as_of or date.today())
-        analysis = self.analyze_portfolio(portfolio, as_of=as_of, start_date=effective_start_date)
+        analysis = self.analyze_portfolio(
+            portfolio,
+            as_of=as_of,
+            start_date=effective_start_date,
+            benchmark_ticker=benchmark_ticker,
+        )
         effective_as_of = as_of or date.today()
         if analysis.timeseries:
             effective_as_of = analysis.timeseries[-1].date
+        collection = portfolio.collection
         return BookSnapshot(
             id=portfolio.id,
             workspace_id=portfolio.workspace_id,
+            collection_id=portfolio.collection_id,
+            collection_name=collection.name if collection is not None else None,
             name=portfolio.name,
             description=portfolio.description,
             created_at=portfolio.created_at,
@@ -97,7 +106,7 @@ class PortfolioEngine:
                 & (price_frame.index <= pd.Timestamp(effective_as_of))
             ].copy()
 
-        if price_frame.empty or benchmark_ticker not in price_frame:
+        if price_frame.empty:
             if self._should_return_cash_only(portfolio, benchmark_ticker, effective_start_date, effective_as_of):
                 return self._cash_only_analysis(
                     portfolio,
@@ -107,7 +116,22 @@ class PortfolioEngine:
                 )
             raise ApiErrorException(503, "market_data_unavailable", "Benchmark market data is unavailable.")
 
-        calendar = price_frame[benchmark_ticker].dropna().index.sort_values()
+        benchmark_series = price_frame[benchmark_ticker].dropna().sort_index() if benchmark_ticker in price_frame else pd.Series(dtype=float)
+        if not benchmark_series.empty:
+            calendar = benchmark_series.index.sort_values()
+        else:
+            if self._should_return_cash_only(portfolio, benchmark_ticker, effective_start_date, effective_as_of):
+                return self._cash_only_analysis(
+                    portfolio,
+                    initial_cash=initial_cash,
+                    benchmark_ticker=benchmark_ticker,
+                    snapshot_date=effective_as_of,
+                )
+            fallback_calendar = next(
+                (price_frame[column].dropna().index.sort_values() for column in price_frame.columns if not price_frame[column].dropna().empty),
+                pd.Index([]),
+            )
+            calendar = fallback_calendar
         if calendar.empty:
             raise ApiErrorException(503, "market_data_unavailable", "No market calendar is available.")
         price_frame = price_frame.reindex(calendar)
@@ -143,10 +167,10 @@ class PortfolioEngine:
         cash_series = pd.Series(initial_cash, index=calendar) + cash_flows.cumsum()
         portfolio_values = cash_series + position_values.sum(axis=1)
 
-        benchmark_series = price_frame[benchmark_ticker].ffill()
-        benchmark_start = benchmark_series.iloc[0]
+        benchmark_series = price_frame[benchmark_ticker].ffill() if benchmark_ticker in price_frame else pd.Series(dtype=float)
+        benchmark_start = benchmark_series.iloc[0] if not benchmark_series.empty else np.nan
         benchmark_values = None
-        if benchmark_start and not np.isnan(benchmark_start):
+        if not np.isnan(benchmark_start) and benchmark_start != 0:
             benchmark_values = (benchmark_series / benchmark_start) * initial_cash
 
         portfolio_returns = portfolio_values.pct_change().dropna()
@@ -385,20 +409,14 @@ class PortfolioEngine:
         )
 
     def _default_start_date(self, portfolio: Portfolio, fallback: date) -> date:
-        if portfolio.workspace is not None:
-            return portfolio.workspace.start_date
+        workspace = self._workspace_for_portfolio(portfolio)
+        if workspace is not None:
+            return workspace.start_date
         if portfolio.positions:
             return min(position.entry_date for position in portfolio.positions)
         return fallback
 
     def _benchmark_ticker_for_portfolio(self, portfolio: Portfolio) -> str:
-        workspace = portfolio.workspace
-        if workspace is not None:
-            for benchmark in workspace.benchmarks:
-                if benchmark.is_primary:
-                    return benchmark.ticker
-            if workspace.benchmarks:
-                return workspace.benchmarks[0].ticker
         return self.settings.market.benchmark_ticker.upper()
 
     def _should_return_cash_only(
@@ -408,13 +426,21 @@ class PortfolioEngine:
         effective_start_date: date,
         effective_as_of: date,
     ) -> bool:
-        if portfolio.workspace is None:
+        if self._workspace_for_portfolio(portfolio) is None:
             return False
         try:
-            next_market_day = self.market_data.resolve_price_on_or_after(benchmark_ticker, effective_start_date).date
+            next_market_day = self.market_data.resolve_price_on_or_after(
+                self.settings.market.benchmark_ticker.upper(),
+                effective_start_date,
+            ).date
         except ApiErrorException:
             return False
         return effective_as_of < next_market_day
+
+    def _workspace_for_portfolio(self, portfolio: Portfolio):
+        if portfolio.collection is not None and portfolio.collection.workspace is not None:
+            return portfolio.collection.workspace
+        return portfolio.workspace
 
     def _compute_sharpe(self, returns: pd.Series, risk_free_rate: float) -> float | None:
         if len(returns) < 30:
