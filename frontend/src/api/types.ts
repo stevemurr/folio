@@ -324,3 +324,92 @@ export type TimeSeriesPoint = {
   cash: number;
   benchmark_value: number | null;
 };
+
+// ---------------------------------------------------------------------------
+// Simulation types
+// ---------------------------------------------------------------------------
+
+export type SimulationStatus = "pending" | "running" | "completed" | "failed";
+export type GeneratorKind = "fixed" | "equal_weight" | "random_weight" | "sweep" | "subset";
+
+export type SimulationCreateRequest = {
+  name: string;
+  description?: string;
+  agent_count: number;
+  generator_kind: GeneratorKind;
+  generator_params: Record<string, unknown>;
+  strategy_template_id?: string | null;
+  initial_cash?: number | null;
+  benchmark_ticker?: string | null;
+};
+
+export type SimulationSummary = {
+  id: string;
+  workspace_id: string;
+  name: string;
+  description: string;
+  status: SimulationStatus;
+  agent_count: number;
+  completed_count: number;
+  generator_kind: string;
+  initial_cash: number;
+  start_date: string;
+  benchmark_ticker: string;
+  created_at: string;
+  completed_at: string | null;
+  error_message: string | null;
+  best_sharpe: number | null;
+  median_sharpe: number | null;
+  best_roi: number | null;
+  median_roi: number | null;
+};
+
+export type SimulationDistribution = {
+  metric: string;
+  values: number[];
+  mean: number;
+  median: number;
+  std: number;
+  min: number;
+  max: number;
+  p5: number;
+  p25: number;
+  p75: number;
+  p95: number;
+};
+
+export type SimulationAgentSummary = {
+  id: string;
+  label: string;
+  allocations: BookAllocationPreview[];
+  total_value: number | null;
+  simple_roi: number | null;
+  annualized_return: number | null;
+  sharpe_ratio: number | null;
+  alpha: number | null;
+  beta: number | null;
+  max_drawdown: number | null;
+  volatility: number | null;
+  benchmark_return: number | null;
+  rank: number;
+};
+
+export type SimulationResults = {
+  simulation_id: string;
+  workspace_id: string;
+  name: string;
+  status: SimulationStatus;
+  agent_count: number;
+  completed_count: number;
+  benchmark_ticker: string;
+  start_date: string;
+  initial_cash: number;
+  distributions: SimulationDistribution[];
+  agents: SimulationAgentSummary[];
+  best_agent_id: string | null;
+  worst_agent_id: string | null;
+};
+
+export type SimulationAgentDetail = SimulationAgentSummary & {
+  timeseries: TimeSeriesPoint[];
+};

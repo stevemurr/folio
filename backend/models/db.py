@@ -193,6 +193,69 @@ class RealEstateMarket(Base):
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, nullable=False)
 
 
+class StrategyTemplate(Base):
+    __tablename__ = "strategy_templates"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    generator_kind: Mapped[str] = mapped_column(String(32), nullable=False, default="fixed")
+    params: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
+class Simulation(Base):
+    __tablename__ = "simulations"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    agent_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    completed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    strategy_template_id: Mapped[str | None] = mapped_column(
+        ForeignKey("strategy_templates.id", ondelete="SET NULL"),
+    )
+    generator_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    generator_params: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    initial_cash: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    benchmark_ticker: Mapped[str] = mapped_column(String(32), nullable=False)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    workspace: Mapped[Workspace] = relationship()
+    agents: Mapped[list["SimulationAgent"]] = relationship(
+        back_populates="simulation",
+        cascade="all, delete-orphan",
+        order_by="SimulationAgent.sort_order",
+    )
+
+
+class SimulationAgent(Base):
+    __tablename__ = "simulation_agents"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    simulation_id: Mapped[str] = mapped_column(ForeignKey("simulations.id", ondelete="CASCADE"), index=True)
+    label: Mapped[str] = mapped_column(String(120), nullable=False)
+    allocations_json: Mapped[str] = mapped_column(Text, nullable=False)
+    total_value: Mapped[float | None] = mapped_column()
+    simple_roi: Mapped[float | None] = mapped_column()
+    annualized_return: Mapped[float | None] = mapped_column()
+    sharpe_ratio: Mapped[float | None] = mapped_column()
+    alpha: Mapped[float | None] = mapped_column()
+    beta: Mapped[float | None] = mapped_column()
+    max_drawdown: Mapped[float | None] = mapped_column()
+    volatility: Mapped[float | None] = mapped_column()
+    benchmark_return: Mapped[float | None] = mapped_column()
+    timeseries_json: Mapped[str | None] = mapped_column(Text)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    simulation: Mapped[Simulation] = relationship(back_populates="agents")
+
+
 class SchemaMigration(Base):
     __tablename__ = "schema_migrations"
 

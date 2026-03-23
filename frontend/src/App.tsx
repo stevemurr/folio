@@ -1,11 +1,11 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { ApiClientError, BookCreateRequest, WorkspaceSummary, api } from "./api/client";
+import { ApiClientError, BookCreateRequest, SimulationCreateRequest, WorkspaceSummary, api } from "./api/client";
 import CreateWorkspaceSetup from "./components/CreateWorkspaceSetup";
+import SimulationsPanel from "./components/SimulationsPanel";
 import WorkspaceBooksPhase from "./components/WorkspaceBooksPhase";
 import WorkspaceBrowser from "./components/WorkspaceBrowser";
-import WorkspaceHero from "./components/WorkspaceHero";
 import WorkspaceTopBar from "./components/WorkspaceTopBar";
 import { Card, CardContent } from "./components/ui/card";
 import {
@@ -19,7 +19,7 @@ import {
 import { useWorkspacePlayback } from "./hooks/useWorkspacePlayback";
 import { defaultGuidedRunDate } from "./lib/guidedRun";
 
-type WorkspacePhase = "books" | "run";
+type WorkspacePhase = "books" | "run" | "simulation-results";
 type WorkspaceScreen = "create" | "browser" | "workspace";
 type BookModalMode = "create" | "edit";
 
@@ -33,7 +33,9 @@ function errorMessage(error: unknown, fallback: string): string {
 const AgentSidebar = lazy(() => import("./components/AgentSidebar"));
 const BookSnapshotPanel = lazy(() => import("./components/BookSnapshotPanel"));
 const CreateBookModal = lazy(() => import("./components/CreateBookModal"));
+const CreateSimulationModal = lazy(() => import("./components/CreateSimulationModal"));
 const SettingsModal = lazy(() => import("./components/SettingsModal"));
+const SimulationResultsView = lazy(() => import("./components/SimulationResultsView"));
 const WorkspaceComparisonChart = lazy(() => import("./components/WorkspaceComparisonChart"));
 
 export default function App() {
@@ -57,6 +59,10 @@ export default function App() {
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [overlayTickers, setOverlayTickers] = useState<string[]>([]);
   const [primaryOverlayTicker, setPrimaryOverlayTicker] = useState<string | null>(null);
+  const [showSimulationModal, setShowSimulationModal] = useState(false);
+  const [simulationError, setSimulationError] = useState<string | null>(null);
+  const [selectedSimulationId, setSelectedSimulationId] = useState<string | null>(null);
+  const [selectedSimAgentId, setSelectedSimAgentId] = useState<string | null>(null);
 
   const workspaceViewQuery = useWorkspaceView(selectedWorkspaceId);
   const workspaceView = workspaceViewQuery.data ?? null;
@@ -109,6 +115,33 @@ export default function App() {
     staleTime: 5 * 60 * 1000,
   });
 
+  const simulationsQuery = useQuery({
+    queryKey: ["simulations", selectedWorkspaceId],
+    queryFn: ({ signal }) => api.listSimulations(selectedWorkspaceId!, signal),
+    enabled: Boolean(selectedWorkspaceId),
+    staleTime: 10 * 1000,
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      if (data?.some((s) => s.status === "pending" || s.status === "running")) return 3000;
+      return false;
+    },
+  });
+  const simulations = simulationsQuery.data ?? [];
+
+  const simulationResultsQuery = useQuery({
+    queryKey: ["simulation-results", selectedSimulationId],
+    queryFn: ({ signal }) => api.getSimulationResults(selectedSimulationId!, signal),
+    enabled: Boolean(selectedSimulationId) && workspacePhase === "simulation-results",
+    staleTime: 30 * 1000,
+  });
+
+  const simAgentDetailQuery = useQuery({
+    queryKey: ["simulation-agent", selectedSimulationId, selectedSimAgentId],
+    queryFn: ({ signal }) => api.getSimulationAgent(selectedSimulationId!, selectedSimAgentId!, signal),
+    enabled: Boolean(selectedSimulationId) && Boolean(selectedSimAgentId),
+    staleTime: 60 * 1000,
+  });
+
   function invalidateWorkspaceQueries(workspaceId: string | null) {
     if (!workspaceId) {
       return Promise.resolve();
@@ -119,6 +152,20 @@ export default function App() {
       queryClient.invalidateQueries({ queryKey: ["workspace-comparison", workspaceId] }),
       queryClient.invalidateQueries({ queryKey: ["book-snapshot"] }),
     ]);
+  }
+
+  function openSimulationResults(simulationId: string) {
+    const sim = simulations.find((s) => s.id === simulationId);
+    if (!sim || sim.status !== "completed") return;
+    setSelectedSimulationId(simulationId);
+    setSelectedSimAgentId(null);
+    setWorkspacePhase("simulation-results");
+  }
+
+  function returnFromSimulationResults() {
+    setWorkspacePhase("books");
+    setSelectedSimulationId(null);
+    setSelectedSimAgentId(null);
   }
 
   function openWorkspaceCreate() {
@@ -174,6 +221,8 @@ export default function App() {
 
   function returnToBooksPhase() {
     setWorkspacePhase("books");
+    setSelectedSimulationId(null);
+    setSelectedSimAgentId(null);
     playback.resetPlayback();
   }
 
@@ -471,6 +520,28 @@ export default function App() {
     },
   });
 
+  const createSimulationMutation = useMutation({
+    mutationFn: (payload: SimulationCreateRequest) => api.createSimulation(selectedWorkspaceId!, payload),
+    onSuccess: async () => {
+      setSimulationError(null);
+      setShowSimulationModal(false);
+      await queryClient.invalidateQueries({ queryKey: ["simulations", selectedWorkspaceId] });
+    },
+    onError: (error) => {
+      setSimulationError(errorMessage(error, "Unable to create simulation."));
+    },
+  });
+
+  const deleteSimulationMutation = useMutation({
+    mutationFn: (simulationId: string) => api.deleteSimulation(simulationId),
+    onSuccess: async (_, deletedId) => {
+      if (selectedSimulationId === deletedId) {
+        returnFromSimulationResults();
+      }
+      await queryClient.invalidateQueries({ queryKey: ["simulations", selectedWorkspaceId] });
+    },
+  });
+
   const loadingState =
     bootstrapQuery.isLoading ||
     settingsQuery.isLoading ||
@@ -515,7 +586,12 @@ export default function App() {
               </div>
             </div>
           ) : screen === "browser" ? (
-            <div className="grid min-h-screen content-start gap-6 py-4 lg:py-10">
+            <div className="mx-auto grid w-full max-w-[1440px] content-start gap-6">
+              <WorkspaceTopBar
+                centerLabel="Workspace Browser"
+                onOpenSettings={() => setShowSettingsModal(true)}
+                settingsDisabled={settingsQuery.isLoading || settingsQuery.isError}
+              />
               <div className="mx-auto grid w-full max-w-[1120px] gap-6">
                 {workspaceError ? (
                   <Card className="border-destructive/20 bg-destructive/10">
@@ -527,11 +603,9 @@ export default function App() {
                   loading={workspacesQuery.isLoading}
                   onCreateWorkspace={openWorkspaceCreate}
                   onDeleteWorkspace={requestWorkspaceDeletion}
-                  onOpenSettings={() => setShowSettingsModal(true)}
                   onPickWorkspace={selectWorkspace}
                   onReturnToWorkspace={selectedWorkspaceId ? () => setScreen("workspace") : undefined}
                   selectedWorkspaceId={selectedWorkspaceId}
-                  settingsDisabled={settingsQuery.isLoading || settingsQuery.isError}
                   workspaces={workspacesQuery.data ?? []}
                 />
               </div>
@@ -549,12 +623,8 @@ export default function App() {
                     onReturnToBooks={returnToBooksPhase}
                     phase={workspacePhase}
                     settingsDisabled={settingsQuery.isLoading || settingsQuery.isError}
-                  />
-
-                  <WorkspaceHero
-                    blockedCollectionCount={blockedCollectionCount}
-                    readyCollectionCount={readyCollectionCount}
-                    workspace={selectedWorkspace}
+                    workspaceName={selectedWorkspace.name}
+                    startDate={selectedWorkspace.start_date}
                   />
                 </>
               ) : null}
@@ -585,26 +655,53 @@ export default function App() {
                   </CardContent>
                 </Card>
               ) : workspacePhase === "books" ? (
-                <WorkspaceBooksPhase
-                  collectionActionPendingId={collectionActionPendingId}
-                  collections={collections}
-                  createCollectionPending={createCollectionPending}
-                  deletePendingBookId={deleteBookMutation.isPending ? (deleteBookMutation.variables ?? null) : null}
-                  onAddBook={openCreateBookModal}
-                  onAddCollection={addCollection}
-                  onDeleteBook={deleteBook}
-                  onDeleteCollection={deleteCollection}
-                  onEditBook={openEditBookModal}
-                  onEditCollectionBankroll={editCollectionBankroll}
-                  onEnterRunPhase={enterRunPhase}
-                  onRenameCollection={renameCollection}
-                  onSelectBook={selectBook}
-                  readyCollectionCount={readyCollectionCount}
-                  runDisabled={workspaceRunState?.status !== "ready"}
-                  selectedBookId={selectedBookId}
-                  workspaceIssue={workspaceRunState?.issues[0]?.message ?? null}
-                  workspaceStatus={workspaceRunState?.status ?? "draft"}
-                />
+                <>
+                  <WorkspaceBooksPhase
+                    collectionActionPendingId={collectionActionPendingId}
+                    collections={collections}
+                    createCollectionPending={createCollectionPending}
+                    deletePendingBookId={deleteBookMutation.isPending ? (deleteBookMutation.variables ?? null) : null}
+                    onAddBook={openCreateBookModal}
+                    onAddCollection={addCollection}
+                    onDeleteBook={deleteBook}
+                    onDeleteCollection={deleteCollection}
+                    onEditBook={openEditBookModal}
+                    onEditCollectionBankroll={editCollectionBankroll}
+                    onEnterRunPhase={enterRunPhase}
+                    onRenameCollection={renameCollection}
+                    onSelectBook={selectBook}
+                    readyCollectionCount={readyCollectionCount}
+                    runDisabled={workspaceRunState?.status !== "ready"}
+                    selectedBookId={selectedBookId}
+                    workspaceIssue={workspaceRunState?.issues[0]?.message ?? null}
+                    workspaceStatus={workspaceRunState?.status ?? "draft"}
+                  />
+
+                  <SimulationsPanel
+                    deletePendingId={deleteSimulationMutation.isPending ? (deleteSimulationMutation.variables ?? null) : null}
+                    onCreateSimulation={() => {
+                      setSimulationError(null);
+                      setShowSimulationModal(true);
+                    }}
+                    onDeleteSimulation={(id) => {
+                      if (!window.confirm("Delete this simulation and all its results?")) return;
+                      deleteSimulationMutation.mutate(id);
+                    }}
+                    onSelectSimulation={openSimulationResults}
+                    selectedSimulationId={selectedSimulationId}
+                    simulations={simulations}
+                  />
+                </>
+              ) : workspacePhase === "simulation-results" && simulationResultsQuery.data ? (
+                <Suspense fallback={null}>
+                  <SimulationResultsView
+                    agentDetail={simAgentDetailQuery.data ?? null}
+                    agentDetailLoading={simAgentDetailQuery.isLoading}
+                    onBack={returnFromSimulationResults}
+                    onSelectAgent={setSelectedSimAgentId}
+                    results={simulationResultsQuery.data}
+                  />
+                </Suspense>
               ) : (
                 <>
                   <Suspense fallback={null}>
@@ -676,6 +773,19 @@ export default function App() {
           onClose={() => setShowAgentDrawer(false)}
           open={showAgentDrawer}
           portfolioId={selectedBookId}
+        />
+      </Suspense>
+
+      <Suspense fallback={null}>
+        <CreateSimulationModal
+          error={simulationError}
+          onClose={() => {
+            setShowSimulationModal(false);
+            setSimulationError(null);
+          }}
+          onSubmit={(payload) => createSimulationMutation.mutate(payload)}
+          open={showSimulationModal}
+          pending={createSimulationMutation.isPending}
         />
       </Suspense>
 

@@ -1,4 +1,4 @@
-import { ArrowLeft, ArrowRight, Settings2, Trash2 } from "lucide-react";
+import { ArrowLeft, ArrowRight, Trash2 } from "lucide-react";
 
 import { WorkspaceSummary } from "../api/client";
 import { cn } from "../lib/utils";
@@ -11,11 +11,9 @@ type Props = {
   loading?: boolean;
   onCreateWorkspace: () => void;
   onDeleteWorkspace?: (workspaceId: string) => void;
-  onOpenSettings?: () => void;
   onPickWorkspace: (workspaceId: string) => void;
   onReturnToWorkspace?: () => void;
   selectedWorkspaceId?: string | null;
-  settingsDisabled?: boolean;
   workspaces: WorkspaceSummary[];
 };
 
@@ -97,11 +95,9 @@ export default function WorkspaceBrowser({
   loading = false,
   onCreateWorkspace,
   onDeleteWorkspace,
-  onOpenSettings,
   onPickWorkspace,
   onReturnToWorkspace,
   selectedWorkspaceId,
-  settingsDisabled,
   workspaces,
 }: Props) {
   return (
@@ -133,12 +129,6 @@ export default function WorkspaceBrowser({
             <Button onClick={onCreateWorkspace} variant="secondary">
               Create Workspace
             </Button>
-            {onOpenSettings ? (
-              <Button disabled={settingsDisabled} onClick={onOpenSettings} variant="ghost">
-                <Settings2 className="h-4 w-4" />
-                Settings
-              </Button>
-            ) : null}
           </div>
         </div>
       </CardHeader>

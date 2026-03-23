@@ -6,7 +6,7 @@ type Props = {
   comparisonDates: string[];
   fallbackSelectedDate: string | null;
   selectedBookId: string | null;
-  workspacePhase: "books" | "run";
+  workspacePhase: "books" | "run" | "simulation-results";
 };
 
 export function useWorkspacePlayback({

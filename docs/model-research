@@ -1,0 +1,247 @@
+# Training a predictive portfolio allocation model end-to-end
+
+A modified Temporal Fusion Transformer with Dirichlet-smoothed labels, cross-entropy loss, and walk-forward purged validation represents the strongest design for this system. The key insight from recent literature is that **training a supervised model on pre-computed optimal weights (the "Decision by Supervised Learning" paradigm) outperforms both two-stage predict-then-optimize and end-to-end Sharpe maximization** in stability and out-of-sample performance. This report provides a complete blueprint—from label construction through architecture selection, loss design, feature engineering, data schema, and practical sourcing—with concrete recommendations at every stage.
+
+The system takes four data modalities (OHLCV, macro, fundamental, sentiment) and outputs a probability simplex over N assets at three horizons simultaneously. Each design choice below is grounded in published research and battle-tested quantitative finance practices.
+
+---
+
+## 1. Constructing Dirichlet-sampled labels without look-ahead bias
+
+### From Dirichlet samples to regression targets
+
+The Dirichlet distribution Dir(α₁, …, αN) is the natural probability distribution over the simplex—vectors of non-negative values summing to 1—making it the canonical tool for sampling candidate portfolio weights. The standard workflow draws K weight vectors from Dir(α), evaluates the Sharpe ratio of each over a forward return window, and selects the best. With α₁ = α₂ = … = αN = 1 (uniform Dirichlet), samples cover the simplex uniformly. Setting all αᵢ > 1 concentrates mass toward equal-weight; all αᵢ < 1 pushes toward concentrated portfolios.
+
+The critical refinement is to **avoid using a single argmax sample as the label**. Instead, select the top-K samples by Sharpe (e.g., K = 50–100), then compute their barycentric mean on the simplex. This ensemble-of-optima approach dramatically reduces label noise—the DSL framework (Kim et al., 2025) demonstrated that deep ensembles of 100 independent runs with averaged weights substantially outperform single-point optima. An even more principled variant fits a Dirichlet distribution to the top-K samples, producing a full distributional label Dir(α̂) rather than a point estimate. A Bayesian shrinkage step further stabilizes labels: **w_smooth = (1 − γ) · w*_optimal + γ · (1/N)**, where γ ∈ [0.1, 0.3] controls shrinkage toward equal-weight. Bodnar et al. (2021, Journal of Banking & Finance) showed this shrinkage consistently improves out-of-sample Sharpe.
+
+### Multi-horizon label design
+
+For simultaneous next-day, next-week, and next-month targets, **run separate Dirichlet optimizations per horizon**. At each date t, compute the Sharpe-optimal weight vector independently over [t+2, t+3] (1-day), [t+2, t+7] (5-day), and [t+2, t+23] (21-day) forward return windows. The 1-day gap between the last feature date and the first label date prevents microstructure leakage. Each horizon produces an independent target vector w^(h) ∈ ℝᴺ on the simplex. Multi-task learning during training handles any tension between horizons—this separation keeps label construction clean while the model learns shared representations across horizons.
+
+### Preventing look-ahead bias in labels
+
+Labels are inherently forward-looking (they encode what the best allocation *would have been*), but features must be strictly causal. The firewall is simple: features at date t use only data from [t − lookback, t − 1]; labels use returns from [t + gap, t + gap + horizon]. Normalization statistics (means, standard deviations) must be computed on expanding or rolling windows ending at t − 1—never on the full dataset. For fundamental data, use the SEC filing date (not the fiscal period end date) to determine when information became public. The Compustat Point-in-Time database or Sharadar fundamentals provide as-reported data with filing timestamps, which is essential since Lyle et al. (2024, Yale) showed that Compustat re-standardization can change quarterly earnings by **100% on average** relative to point-in-time figures.
+
+Incorporate **transaction costs directly into the label-generating optimization** to produce realistic targets:
+
+```
+max  w'μ − λw'Σw − γΣ|wᵢ − wᵢ,prev|
+s.t. Σwᵢ = 1, wᵢ ≥ 0
+```
+
+The turnover penalty γ (calibrated to 10–50 basis points per side) acts as an implicit regularizer. Olivares-Nadal and DeMiguel showed that a quadratic cost model reduces minimum-variance portfolio turnover from **80.84% to 6.44% monthly** while improving out-of-sample performance.
+
+---
+
+## 2. Feature engineering across four data modalities
+
+### OHLCV: price, volume, and cross-asset structure
+
+The price/volume feature set should capture momentum, volatility, liquidity, and cross-asset correlation at multiple timescales. Compute **log returns at 1, 5, 21, 63, 126, and 252-day** horizons per ticker. For volatility, the Garman-Klass estimator (incorporating open/high/low/close) provides the best efficiency-simplicity tradeoff, computed at 5, 10, 21, 63, and 252-day rolling windows. Supplement with Yang-Zhang (2000) for robustness to overnight gaps, and include **vol-of-vol** (rolling standard deviation of rolling volatility) as a regime-change indicator.
+
+For cross-asset correlation structure, avoid flattening the full N(N−1)/2 pairwise correlations (intractable for large N). Instead, extract eigenvalue-based summary statistics from the 63-day rolling correlation matrix: the **first eigenvalue's share of total variance** (market factor dominance—high values signal risk-off regimes), the ratio λ₁/λ₂, and the effective number of independent bets (Σλᵢ)²/Σλᵢ². These 3–5 features capture the essential dimensionality of correlation dynamics.
+
+Momentum indicators include RSI at 5, 14, 21, and 63-day windows; MACD (12, 26, 9); and SMA ratios (50/200-day) as trend indicators. For liquidity, use the **Amihud (2002) illiquidity ratio** (|return|/dollar volume, averaged over 21 days)—one of the most cited illiquidity proxies with 12,000+ citations—and volume ratios relative to 20-day moving averages.
+
+Cross-sectionally, compute **percentile ranks** of each feature across all tickers at each date. This relative-strength normalization is standard in factor investing and ensures the model learns which assets are cheap, volatile, or liquid *relative to peers*.
+
+### Macro indicators: solving the mixed-frequency problem
+
+Key macro features include VIX (daily), yield curve spreads—2s10s and 3m10y (daily), Fed funds rate (daily), CPI (monthly), PMI/ISM (monthly), unemployment (monthly), GDP growth (quarterly), and initial jobless claims (weekly). The alignment challenge is that daily models need daily feature vectors.
+
+The practical solution is **forward-fill (last observation carried forward)** for all lower-frequency series, augmented with two critical metadata features per macro variable: `days_since_last_update` and `days_until_next_release` (from economic calendars). Forward-filling is the only valid approach—interpolation uses future information. The MIDAS (Mixed Data Sampling) literature (Ghysels, Santa-Clara & Valkanov, 2005) provides the theoretical foundation, and recent work on Mixed-Frequency Machine Learning (Borup & Schütte, 2022) shows that U-MIDAS with regularization works well within ML frameworks.
+
+**Include all three representations of each macro variable**: levels (capture regime), first differences (capture trend), and surprises (actual minus consensus, standardized). Surprises are the most predictive for short-horizon returns. Heston and Sinha (2016, Federal Reserve) found that negative macro surprises have **delayed effects lasting up to one quarter**, while positive surprises incorporate quickly—motivating the inclusion of decayed surprise features at multiple half-lives.
+
+### Fundamental and earnings data: point-in-time correctness is non-negotiable
+
+Key fundamentals include valuation ratios (P/E, P/B, EV/EBITDA, FCF yield), quality metrics (ROE, ROA, accruals), growth rates (revenue and earnings YoY), and analyst revision momentum. The cardinal rule: **use filing dates, not period-end dates**. Earnings for a fiscal quarter ending December 31 may not be filed until February or March. Wang et al. (2014) showed that using period-end dates instead of actual availability dates inflates earnings-yield factor performance by **60%**.
+
+For earnings surprises, construct Standardized Unexpected Earnings (SUE) as (actual EPS − median analyst consensus) / stock price, using IBES estimates confirmed within 90 days of announcement and split-adjusted. Analyst revision momentum—the change in consensus EPS estimates over 1–3 months—is a strong, well-documented alpha signal.
+
+Normalize fundamentals **cross-sectionally within sectors** at each date. A P/E of 25 means something very different for a tech company versus a utility. Within-sector z-scores remove this heterogeneity. For quality and growth metrics, universe-wide percentile ranks work well.
+
+Survivorship bias is equally critical. Excluding delisted stocks inflates backtested returns by **1.6–2% annually** and can inflate Sharpe ratios by up to 0.5. Use survivorship-bias-free databases (CRSP, Sharadar) and include delisted stocks in training data up to their delisting date with terminal returns.
+
+### Sentiment and NLP signals: FinBERT with exponential decay aggregation
+
+**FinBERT** (Araci, 2019; `ProsusAI/finbert` on HuggingFace) is the recommended sentiment model—a BERT-base architecture fine-tuned on Financial PhraseBank achieving ~89% accuracy on financial news, a **14 percentage point improvement** over generic BERT. It outputs softmax probabilities for positive/negative/neutral classes. VADER is 339× faster but achieves only 44–56% accuracy on financial text. GPT-4 offers marginal improvement at 100×+ cost.
+
+For daily aggregation of multiple headlines per ticker, construct this feature vector:
+
+- Mean sentiment score (P(positive) − P(negative))
+- Count of positive, negative, and neutral headlines
+- Max positive and max negative sentiment scores
+- Total news volume (headline count)
+- Sentiment dispersion (standard deviation of scores)
+
+Apply **exponential decay weighting** to historical sentiment with multiple half-lives (1, 3, 5, and 10 days) as separate features: AggSentiment_t = Σ exp(−λk) · Sentiment_{t−k}. This captures both rapid-incorporation positive news effects and the slow-decaying predictive power of negative news documented by Heston and Sinha.
+
+### Normalization strategy summary
+
+| Feature type | Normalization approach |
+|---|---|
+| Log returns | Already stationary; winsorize at 0.1%/99.9% percentiles |
+| Volatility | Per-ticker expanding-window z-score |
+| Valuation ratios (P/E, P/B) | Within-sector cross-sectional z-score at each date |
+| Macro indicators | Expanding-window z-score (shared across tickers) |
+| Sentiment scores | Bounded [−1, 1]; no normalization or cross-sectional rank |
+| Volume features | Per-ticker robust scaling (median/IQR) |
+| Growth rates, quality metrics | Universe-wide percentile rank |
+
+Apply time-series normalization first (to remove temporal non-stationarity), then cross-sectional normalization (to remove cross-sectional heterogeneity). For fat-tailed features, use **robust scaling** (center on median, scale by IQR) rather than z-score, and log-transform right-skewed features (volume, market cap) before any scaling.
+
+---
+
+## 3. Architecture comparison and recommendation
+
+### Why the Temporal Fusion Transformer is the strongest match
+
+The TFT (Lim, Arık, Loeff & Pfister, 2021, International Journal of Forecasting) is purpose-built for exactly this problem's requirements. It natively handles **multi-horizon prediction** (producing outputs at each future step in a single forward pass), **mixed-frequency inputs** via its three-input taxonomy (static covariates for sector/metadata, known future inputs for calendar features and scheduled macro releases, past observed inputs for OHLCV and sentiment), and provides **interpretable variable selection** through learned softmax-weighted Variable Selection Networks. The Gated Residual Networks adaptively apply non-linear processing only where warranted—valuable for noisy financial data.
+
+To adapt TFT for portfolio allocation, replace the quantile regression output heads with **per-horizon softmax heads** that produce weight vectors on the simplex. Add a cross-asset attention layer in the decoder (TFT natively processes per-entity; portfolio allocation requires cross-entity reasoning). For uncertainty quantification, use a **Dirichlet output layer** instead of softmax: the network outputs concentration parameters α via softplus activation, with the mean allocation as αᵢ/Σαⱼ and total concentration S = Σαᵢ encoding prediction confidence. Low-confidence predictions (low S) can trigger a fallback to equal-weight or minimum-variance allocation.
+
+Available implementations include `pytorch-forecasting` (full TFT with Optuna hyperparameter optimization), `Darts`, and Google's reference TensorFlow implementation.
+
+### How alternatives compare
+
+**LSTM/GRU with multi-task heads** is the strongest baseline: a 2–3 layer bidirectional LSTM encoder (128–256 hidden units) with Bahdanau attention feeding three horizon-specific softmax heads. Fischer & Krauss (2018) showed LSTMs are remarkably consistent for financial prediction across training runs, and they remain competitive with smaller datasets. Training is simpler and better understood than Transformer-based approaches.
+
+**PatchTST** (Nie et al., 2023, ICLR) achieves 21% MSE reduction over prior Transformer models on standard benchmarks, but its **channel-independence assumption is disqualifying** for portfolio allocation—it ignores cross-asset correlations that drive diversification benefits. It also lacks support for static covariates, categorical inputs, and has no native multi-horizon granularity support.
+
+**Gradient boosting (XGBoost/LightGBM)** excels with tabular macro and fundamental features—Grinsztajn et al. (2022) showed GBMs are SOTA for heterogeneous tabular data. However, GBMs require flattening temporal structure into hand-crafted lag features, cannot enforce the simplex constraint during training, and need separate models per asset and horizon. Best used as a **component** rather than the full system.
+
+**Hybrid TFT + LightGBM** is the runner-up recommendation: train LightGBM on tabular macro/fundamental features, extract leaf indices as embeddings, and feed these as static covariates into TFT alongside time-series features. This combines GBM's strength with heterogeneous tabular data and TFT's sequential modeling capability.
+
+### Portfolio-specific architectures worth considering
+
+**DeepDow** (Krepl, 2020) is a PyTorch framework purpose-built for end-to-end portfolio optimization, with built-in allocation layers (softmax, sparsemax, differentiable Markowitz via cvxpylayers) and portfolio performance losses (Sharpe, maximum drawdown). It is ideal for rapid prototyping.
+
+**Differentiable convex optimization layers** (Agrawal et al., NeurIPS 2019; cvxpylayers) embed a mean-variance optimizer as a differentiable neural network layer. The network predicts return estimates μ̂ and covariance Σ̂, which feed into a Markowitz layer that outputs guaranteed-feasible weights satisfying all portfolio constraints (max weight, turnover limits, cardinality) by construction. The cost is computational overhead from solving an optimization problem in every forward pass.
+
+### Architecture decision matrix
+
+| Architecture | Multi-horizon | Mixed-frequency | Simplex output | Training complexity | Interpretability | **Overall fit** |
+|---|---|---|---|---|---|---|
+| **TFT (modified)** | Native | Native 3-input taxonomy | Softmax/Dirichlet head | Moderate | Variable selection + attention | **Best** |
+| Hybrid TFT + GBM | Native | Excellent | Softmax head | High | Tower-specific | **Runner-up** |
+| LSTM multi-task | Via multi-head | Manual handling | Natural softmax | Low | Attention + SHAP | **Best baseline** |
+| PatchTST | Needs adaptation | No static/categorical | Needs cross-channel mod | Low | Limited | **Not recommended** |
+| XGBoost/LightGBM | Separate models | Native tabular | Post-processing only | Very low | SHAP, gain importance | **Tabular component only** |
+| DeepDow (e2e) | Single horizon native | Channel-based | Guaranteed by construction | Moderate | Risk contributions | **Best for prototyping** |
+
+---
+
+## 4. Loss function design for simplex-constrained multi-horizon prediction
+
+### Cross-entropy on weight vectors is the primary recommendation
+
+The DSL framework (Kim et al., 2025, ACM ICAIF) provides the strongest evidence for loss function selection. Their approach computes optimal weights offline via convex optimization, then trains a supervised model to predict those weights using **cross-entropy loss**: L_CE = −Σᵢ w*ᵢ log(ŵᵢ). This treats target weights as a soft categorical distribution. The key finding: cross-entropy on weight vectors is **more stable than directly optimizing Sharpe ratio as a loss function**, and outperforms both end-to-end Sharpe optimization and predict-then-optimize approaches.
+
+KL divergence—L_KL = Σᵢ w*ᵢ log(w*ᵢ/ŵᵢ)—is equivalent to cross-entropy plus a constant and is equally valid. The symmetric Jensen-Shannon divergence may offer better numerical stability.
+
+### Dirichlet negative log-likelihood for uncertainty-aware predictions
+
+When the model outputs Dirichlet concentration parameters α rather than point weights, the loss becomes L_Dir = −[log Γ(Σαᵢ) − Σ log Γ(αᵢ) + Σ(αᵢ − 1) log(w*ᵢ)]. This allows the model to express **calibrated uncertainty** about allocations. The total concentration S = Σαᵢ serves as a confidence signal: high S means the model is confident in its allocation, low S indicates uncertainty. This uncertainty signal can drive dynamic risk management—routing low-confidence predictions to a safe fallback (equal-weight or minimum-variance).
+
+### Differentiable Sharpe as an auxiliary loss
+
+The differentiable Sharpe ratio—L_Sharpe = −mean(rₚ)/std(rₚ) where rₚ = wᵀr over the horizon—can serve as an auxiliary loss alongside cross-entropy. Moody and Wu's (1998) Differential Sharpe Ratio provides an online, numerically stable approximation using exponential moving statistics. However, Sharpe as a sole training objective is non-convex and leads to unstable optimization. **Use a weighted combination**: L_total = α · L_CE + (1 − α) · L_Sharpe with α ∈ [0.7, 0.9], giving cross-entropy the dominant role.
+
+### Multi-task loss weighting across horizons
+
+With three horizon heads producing losses L₁ᵈ, L₅ᵈ, L₂₁ᵈ, the combined loss requires careful balancing. **Uncertainty weighting** (Kendall, Gal & Cipolla, CVPR 2018) is the recommended approach: L = Σₕ (1/2σₕ²) · Lₕ + log(σₕ), where σₕ are learnable homoscedastic noise parameters per horizon. Higher uncertainty in noisier horizons automatically reduces their gradient contribution. GradNorm (Chen et al., ICML 2018) provides an alternative that dynamically equalizes gradient norms across tasks. For conflicting gradients between horizons, PCGrad (Yu et al., NeurIPS 2020) projects conflicting gradient components away, addressing negative transfer.
+
+### The end-to-end versus two-stage tradeoff
+
+The literature reveals three viable paradigms, ranked by empirical performance:
+
+1. **Decision by Supervised Learning (DSL)**: Compute optimal weights offline → train on cross-entropy. Most stable, best out-of-sample Sharpe.
+2. **End-to-end with differentiable optimization layer**: Network predicts μ̂, Σ̂ → cvxpylayers solves Markowitz → Sharpe loss backpropagates through solver. Guarantees constraint satisfaction. Zhang et al. (2021) showed this outperforms two-stage on WRDS data.
+3. **Two-stage predict-then-optimize**: Predict returns/covariances separately → solve offline optimization. Most interpretable but suboptimal due to error propagation.
+
+**The recommendation is DSL** (paradigm 1), matching the user's existing Dirichlet sampling workflow. The pre-computed optimal weights become training labels, and cross-entropy provides a clean, convex training objective.
+
+---
+
+## 5. Training data schema and validation strategy
+
+### What one training sample looks like
+
+Each training example is indexed by a single date t, containing all N tickers' features stacked together—**not** individual ticker-date pairs. Portfolio allocation is inherently cross-sectional; the model must see all assets simultaneously to learn relative allocations.
+
+```
+Input:
+  OHLCV tensor:       [252 × N × 6]    # 252-day lookback, N tickers, 6 features per ticker
+  Macro tensor:       [252 × 15]        # 252-day lookback, 15 global macro features
+  Fundamental tensor: [4 × N × 12]      # Last 4 quarterly snapshots, 12 ratios per ticker
+  Sentiment tensor:   [21 × N × 7]      # 21-day lookback, 7 sentiment features per ticker
+  Static metadata:    [N × d_static]    # Sector, market cap bucket per ticker
+
+Target:
+  weights_1d:  [N]   # Simplex-constrained, sum = 1
+  weights_5d:  [N]
+  weights_21d: [N]
+```
+
+For a 50-ticker universe with the features described in Section 2, the total per-timestep feature width is approximately 315 (50 × 6 OHLCV + 15 macro), with fundamentals and sentiment as auxiliary tensors at their natural frequencies.
+
+### Windowing and stride
+
+Use a **252 trading day (1-year) lookback** for OHLCV features, **21 days for sentiment**, and the **last 4 quarters for fundamentals** (point-in-time). The training set spans a **756–1,260 day (3–5 year) rolling window**, with an expanding-window variant preferable early in the dataset lifecycle when history is limited.
+
+Set stride to **1 day** for maximum data utilization, but apply **sample uniqueness weighting** (López de Prado, AFML Chapter 4) to account for label overlap: with 21-day labels, consecutive samples share 20 days of returns, so weight each sample inversely proportional to its concurrent label count. Alternatively, use stride = 5 (weekly) to reduce overlap at the cost of fewer training samples.
+
+### Walk-forward validation with purging and embargo
+
+Standard k-fold cross-validation **fails catastrophically** in financial time series due to temporal autocorrelation and label overlap. The gold-standard approach is **purged walk-forward cross-validation**:
+
+**Purging** removes training observations whose label windows overlap temporally with any test observation. If a test label depends on returns from [t, t + h], all training labels sharing any returns in that window are excluded. **Embargo** adds a buffer of e days (typically 1–5% of dataset size, e.g., 5–50 days) after each test fold boundary to prevent leakage from autocorrelated returns.
+
+A practical walk-forward setup: train on [0, T₁], validate on [T₁ + embargo, T₂], test on [T₂ + embargo, T₃], sliding forward by 6 months. Use **5–10 walk-forward windows** for robust evaluation. López de Prado's **Combinatorial Purged Cross-Validation (CPCV)** provides a more statistically rigorous alternative: partition T observations into N = 6 groups, select k = 2 for testing, generating C(6,2) = 15 unique train/test splits. The `skfolio.model_selection.CombinatorialPurgedCV` implementation handles this automatically.
+
+Additional leakage safeguards: compute all normalization statistics only on training data and apply the fitted scaler to validation/test; forward-fill only (never backfill) for missing data; and consider fractional differentiation (López de Prado, Chapter 5) to achieve stationarity while preserving memory, rather than full differencing which destroys information.
+
+---
+
+## 6. Regime detection, distribution shift, and practical sourcing
+
+### Regime conditioning as an auxiliary signal
+
+Optimal allocations shift dramatically across market regimes—the model needs regime awareness to avoid learning averaged-out, always-wrong allocations. **Hidden Markov Models (HMM)** are the most established approach: fit a `GaussianHMM` (from `hmmlearn`) with 2–4 states to observable features including SPX returns, realized volatility, credit spreads (log(HYG) − log(LQD)), VIX term structure (VIX3M/VIX), and drawdown from recent peaks.
+
+Feed the HMM's regime probability vector [P(state₁), P(state₂), …] as **input features** to the allocation model. This lets the model learn regime-conditional allocation strategies without requiring separate per-regime models. Additionally, include regime-transition probabilities and "regime age" (days since last transition) as features.
+
+For robustness to distribution shift, use a **fixed 3–5 year rolling training window** rather than expanding (prevents overfitting to defunct regimes), retrain monthly, and apply exponential time-decay on sample weights so recent observations receive more influence. The hybrid approach—expanding window with sample decay—is the most data-efficient strategy.
+
+### Recommended data sourcing stack
+
+For a cost-effective but production-quality pipeline:
+
+- **OHLCV**: Polygon.io ($29–199/month for 15+ years of history, REST/WebSocket APIs) for production; `yfinance` (free, survivorship-biased) for prototyping only
+- **Point-in-time fundamentals**: Sharadar via Nasdaq Data Link (~$300–600/year)—excellent cost/quality ratio with active and delisted stocks and minimal survivorship bias. For institutional budgets, Compustat Point-in-Time via WRDS is the gold standard
+- **Macro data**: FRED (free, 800,000+ series via `fredapi` Python package)—covers GDP, CPI, unemployment, yield curves, credit spreads, and more
+- **Sentiment**: FinBERT (`ProsusAI/finbert` on HuggingFace, free) applied to headlines from GDELT (free) or NewsAPI (free tier: 100 requests/day; paid: $449/month). For institutional needs, RavenPack ($10K+/year) provides pre-computed sentiment with entity linking
+- **Regime detection**: `hmmlearn` (free, open-source)
+
+### Open-source frameworks for the pipeline
+
+- **skfolio**: Portfolio optimization on scikit-learn API with `CombinatorialPurgedCV`, `WalkForward`, and `HierarchicalRiskParity`
+- **DeepDow**: End-to-end differentiable portfolio optimization with built-in Sharpe loss and cvxpylayers integration
+- **pytorch-forecasting**: Full TFT implementation with training utilities
+- **Qlib** (Microsoft): Complete ML pipeline for quantitative investment including data processing, model training, and backtesting
+- **PyPortfolioOpt**: Classical mean-variance, Black-Litterman, and HRP optimization for generating Dirichlet-alternative labels
+
+---
+
+## Conclusion: a concrete implementation roadmap
+
+The strongest design pairs the DSL paradigm (Dirichlet-sampled optimal weights as smoothed cross-entropy targets) with a modified TFT architecture featuring per-horizon softmax or Dirichlet output heads and uncertainty-weighted multi-task learning. Three concrete steps to implementation:
+
+**First**, build the label pipeline: Dirichlet-sample K = 10,000 weight vectors per date, evaluate transaction-cost-penalized Sharpe over each forward horizon, average the top 50–100, apply 10–20% shrinkage toward equal-weight. Store labels with their generating parameters for reproducibility.
+
+**Second**, build features incrementally: start with OHLCV returns and volatility (the strongest signals), add macro features with forward-fill and staleness indicators, integrate point-in-time fundamentals from Sharadar, and finally add FinBERT sentiment with exponential decay aggregation. Each modality should demonstrably improve validation Sharpe before being retained.
+
+**Third**, train with walk-forward purged validation: 3-year rolling training window, 6-month validation, 6-month test, monthly retraining. Use cross-entropy as the primary loss with an auxiliary Sharpe component (α = 0.8 CE + 0.2 Sharpe), uncertainty weighting across horizons, and regime probability features from a pre-trained HMM. Start with the LSTM baseline for fast iteration, then graduate to the modified TFT for production.
+
+The single most impactful design choice is **label quality**—noisy, unsmoothed, single-sample Dirichlet optima will poison any architecture. Invest heavily in the label smoothing and transaction-cost-aware optimization described in Section 1 before tuning model architecture or hyperparameters.

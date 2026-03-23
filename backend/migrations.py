@@ -16,6 +16,9 @@ from backend.models.db import (
     Position,
     RealEstateMarket,
     SchemaMigration,
+    Simulation,
+    SimulationAgent,
+    StrategyTemplate,
     Workspace,
     WorkspaceBenchmark,
     now_utc,
@@ -107,6 +110,12 @@ def _upgrade_collections_first_workspace_flow(connection: Connection) -> None:
         )
 
 
+def _upgrade_simulations(connection: Connection) -> None:
+    StrategyTemplate.__table__.create(bind=connection, checkfirst=True)
+    Simulation.__table__.create(bind=connection, checkfirst=True)
+    SimulationAgent.__table__.create(bind=connection, checkfirst=True)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration("0001_initial", "Create Folio core tables.", _upgrade_initial),
     Migration("0002_real_estate_markets", "Create Zillow real-estate catalog table.", _upgrade_real_estate_markets),
@@ -124,6 +133,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         "0005_collections_first_workspace_flow",
         "Add book collections and backfill one collection per workspace.",
         _upgrade_collections_first_workspace_flow,
+    ),
+    Migration(
+        "0006_simulations",
+        "Add strategy templates, simulations, and simulation agents tables.",
+        _upgrade_simulations,
     ),
 )
 

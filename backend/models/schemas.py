@@ -408,3 +408,106 @@ class AppSettingsUpdate(ApiModel):
     agent: AppSettingsAgentUpdate | None = None
     scheduler: AppSettingsSchedulerUpdate | None = None
     real_estate: AppSettingsRealEstateUpdate | None = None
+
+
+# ---------------------------------------------------------------------------
+# Simulation schemas
+# ---------------------------------------------------------------------------
+
+SimulationStatus = Literal["pending", "running", "completed", "failed"]
+GeneratorKind = Literal["fixed", "equal_weight", "random_weight", "sweep", "subset"]
+
+
+class SimulationCreate(ApiModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str = ""
+    agent_count: int = Field(ge=1, le=1000)
+    generator_kind: GeneratorKind
+    generator_params: dict = Field(default_factory=dict)
+    strategy_template_id: str | None = None
+    initial_cash: Decimal | None = Field(default=None, gt=0)
+    benchmark_ticker: str | None = None
+
+
+class SimulationSummary(ApiModel):
+    id: str
+    workspace_id: str
+    name: str
+    description: str
+    status: SimulationStatus
+    agent_count: int
+    completed_count: int
+    generator_kind: str
+    initial_cash: float
+    start_date: date
+    benchmark_ticker: str
+    created_at: datetime
+    completed_at: datetime | None = None
+    error_message: str | None = None
+    best_sharpe: float | None = None
+    median_sharpe: float | None = None
+    best_roi: float | None = None
+    median_roi: float | None = None
+
+
+class SimulationDistribution(ApiModel):
+    metric: str
+    values: list[float]
+    mean: float
+    median: float
+    std: float
+    min: float
+    max: float
+    p5: float
+    p25: float
+    p75: float
+    p95: float
+
+
+class SimulationAgentSummary(ApiModel):
+    id: str
+    label: str
+    allocations: list[BookAllocationPreview]
+    total_value: float | None = None
+    simple_roi: float | None = None
+    annualized_return: float | None = None
+    sharpe_ratio: float | None = None
+    alpha: float | None = None
+    beta: float | None = None
+    max_drawdown: float | None = None
+    volatility: float | None = None
+    benchmark_return: float | None = None
+    rank: int = 0
+
+
+class SimulationResults(ApiModel):
+    simulation_id: str
+    workspace_id: str
+    name: str
+    status: SimulationStatus
+    agent_count: int
+    completed_count: int
+    benchmark_ticker: str
+    start_date: date
+    initial_cash: float
+    distributions: list[SimulationDistribution]
+    agents: list[SimulationAgentSummary]
+    best_agent_id: str | None = None
+    worst_agent_id: str | None = None
+
+
+class SimulationAgentDetail(ApiModel):
+    id: str
+    label: str
+    allocations: list[BookAllocationPreview]
+    total_value: float | None = None
+    simple_roi: float | None = None
+    annualized_return: float | None = None
+    sharpe_ratio: float | None = None
+    alpha: float | None = None
+    beta: float | None = None
+    max_drawdown: float | None = None
+    volatility: float | None = None
+    benchmark_return: float | None = None
+    rank: int = 0
+    timeseries: list[BookTimeSeriesPoint] = Field(default_factory=list)

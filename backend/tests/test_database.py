@@ -51,6 +51,7 @@ def test_init_database_runs_revisioned_migrations(tmp_path: Path, monkeypatch: p
         "0003_workspace_books",
         "0004_workspace_strategy_model",
         "0005_collections_first_workspace_flow",
+        "0006_simulations",
     ]
     assert init_database() == []
 
@@ -70,6 +71,7 @@ def test_init_database_runs_revisioned_migrations(tmp_path: Path, monkeypatch: p
         "0003_workspace_books",
         "0004_workspace_strategy_model",
         "0005_collections_first_workspace_flow",
+        "0006_simulations",
     ]
 
     Base.metadata.drop_all(bind=engine)
@@ -136,7 +138,7 @@ def test_collections_migration_backfills_existing_workspace_books(tmp_path: Path
             )
         )
 
-    assert run_migrations(engine) == ["0005_collections_first_workspace_flow"]
+    assert run_migrations(engine) == ["0005_collections_first_workspace_flow", "0006_simulations"]
 
     session = get_session_factory()()
     try:

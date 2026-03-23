@@ -5,6 +5,7 @@ export { buildAgentChatUrl, streamAgentAnalysis } from "./agent";
 import { agentApi } from "./agent";
 import { appApi } from "./app";
 import { marketApi } from "./market";
+import { simulationApi } from "./simulations";
 import { workspaceApi } from "./workspaces";
 
 export const api = {
@@ -12,4 +13,5 @@ export const api = {
   ...workspaceApi,
   ...marketApi,
   ...agentApi,
+  ...simulationApi,
 };
